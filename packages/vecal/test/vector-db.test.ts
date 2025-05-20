@@ -64,6 +64,29 @@ describe('VectorDB basic operations', () => {
     }
   });
 
+  it('builds index and performs ANN search', async () => {
+    const id1 = await db.add(VEC_APPLE, { label: 'Apple' });
+    await db.add(VEC_BANANA, { label: 'Banana' });
+    await db.add(VEC_CHERRY, { label: 'Cherry' });
+
+    await db.buildIndex(8);
+    const results = await db.annSearch(QUERY_VEC, 2);
+    expect(results.length).toBe(2);
+    const ids = results.map(r => r.id);
+    expect(ids).toContain(id1);
+  });
+
+  it('updates index on delete', async () => {
+    const id1 = await db.add(VEC_APPLE, { label: 'Apple' });
+    await db.add(VEC_BANANA, { label: 'Banana' });
+    await db.buildIndex();
+    await db.delete(id1);
+
+    const results = await db.annSearch(VEC_APPLE, 2);
+    const ids = results.map(r => r.id);
+    expect(ids).not.toContain(id1);
+  });
+
   it('rejects dimension mismatch', async () => {
     const wrong = new Float32Array([1, 2]);
     await expect(db.add(wrong)).rejects.toThrow();
