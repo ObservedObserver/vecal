@@ -180,7 +180,7 @@ export class VectorDB {
                 const dotProduct = this.dotProduct(query, entry.vector);
                 score = dotProduct / (queryNorm * (entry.norm || 0));
             } else {
-                score = -euclideanDistance(query, entry.vector); // 负号转为相似度（越大越好）
+                score = -euclideanDistance(query, entry.vector); // negative euclidean distance for max similarity
             }
 
             results.push({
