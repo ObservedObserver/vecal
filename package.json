@@ -6,6 +6,9 @@
   "workspaces": [
     "packages/*"
   ],
+  "scripts": {
+    "test": "yarn workspace vecal test"
+  },
   "prettier": {
     "tabWidth": 4,
     "singleQuote": true,

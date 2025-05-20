@@ -9,4 +9,8 @@ export default defineConfig({
             fileName: (format) => `vecal.${format}.js`,
         },
     },
+    test: {
+        globals: true,
+        environment: 'jsdom',
+    },
 });
