@@ -1,4 +1,5 @@
 import { VectorDBConfig, VectorEntry, SearchResult, DistanceType } from './types';
+import { LSHIndex } from './lsh-index';
 import { cosineSimilarity, euclideanDistance } from '../lib/similarity';
 import { generateId } from '../utils/id';
 import { validateDimension } from '../utils/validation';
@@ -9,6 +10,7 @@ export class VectorDB {
     private storeName: string;
     private dbPromise: Promise<IDBDatabase>;
     private db?: IDBDatabase;
+    private index?: LSHIndex;
 
     constructor(config: VectorDBConfig) {
         this.dbName = config.dbName;
@@ -57,7 +59,12 @@ export class VectorDB {
             const tx = db.transaction(this.storeName, 'readwrite');
             const store = tx.objectStore(this.storeName);
             store.add(entry);
-            tx.oncomplete = () => resolve(id);
+            tx.oncomplete = () => {
+                if (this.index) {
+                    this.index.add(id, vector);
+                }
+                resolve(id);
+            };
             tx.onerror = () => reject(tx.error);
         });
     }
@@ -100,6 +107,10 @@ export class VectorDB {
                 }
 
                 store.put(updatedEntry);
+                if (this.index) {
+                    this.index.remove(id, current.vector);
+                    this.index.add(id, updatedEntry.vector);
+                }
             };
             getReq.onerror = () => reject(getReq.error);
 
@@ -110,13 +121,40 @@ export class VectorDB {
 
     async delete(id: string): Promise<void> {
         const db = await this.dbPromise;
+        const entry = await this.get(id);
         return new Promise((resolve, reject) => {
             const tx = db.transaction(this.storeName, 'readwrite');
             const store = tx.objectStore(this.storeName);
             store.delete(id);
-            tx.oncomplete = () => resolve();
+            tx.oncomplete = () => {
+                if (this.index && entry) {
+                    this.index.remove(id, entry.vector);
+                }
+                resolve();
+            };
             tx.onerror = () => reject(tx.error);
         });
+    }
+
+    private async getAllEntries(): Promise<VectorEntry[]> {
+        const db = await this.dbPromise;
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(this.storeName, 'readonly');
+            const store = tx.objectStore(this.storeName);
+            const request = store.getAll();
+
+            request.onsuccess = () => resolve(request.result as VectorEntry[]);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async buildIndex(numHashes: number = 10): Promise<void> {
+        const entries = await this.getAllEntries();
+        const index = new LSHIndex(this.dimension, numHashes);
+        for (const entry of entries) {
+            index.add(entry.id, entry.vector);
+        }
+        this.index = index;
     }
 
     async search(query: Float32Array, k: number = 5, distanceType: DistanceType = 'cosine'): Promise<SearchResult[]> {
@@ -142,7 +180,7 @@ export class VectorDB {
                 const dotProduct = this.dotProduct(query, entry.vector);
                 score = dotProduct / (queryNorm * (entry.norm || 0));
             } else {
-                score = -euclideanDistance(query, entry.vector); // 负号转为相似度（越大越好）
+                score = -euclideanDistance(query, entry.vector); // negative euclidean distance for max similarity
             }
 
             results.push({
@@ -152,6 +190,43 @@ export class VectorDB {
             });
         }
 
+        return results.sort((a, b) => b.score - a.score).slice(0, k);
+    }
+
+    async annSearch(
+        query: Float32Array,
+        k: number = 5,
+        radius: number = 1,
+        distanceType: DistanceType = 'cosine'
+    ): Promise<SearchResult[]> {
+        validateDimension(query, this.dimension);
+        if (!this.index) {
+            await this.buildIndex();
+        }
+        const candidateIds = this.index ? this.index.query(query, radius) : [];
+        const entries: VectorEntry[] = [];
+        for (const id of candidateIds) {
+            const e = await this.get(id);
+            if (e) entries.push(e);
+        }
+        // fallback to full search if no candidates
+        if (entries.length === 0) {
+            const all = await this.getAllEntries();
+            for (const e of all) entries.push(e);
+        }
+
+        const results: SearchResult[] = [];
+        const queryNorm = distanceType === 'cosine' ? this.calculateNorm(query) : 0;
+        for (const entry of entries) {
+            let score: number;
+            if (distanceType === 'cosine') {
+                const dotProduct = this.dotProduct(query, entry.vector);
+                score = dotProduct / (queryNorm * (entry.norm || 0));
+            } else {
+                score = -euclideanDistance(query, entry.vector);
+            }
+            results.push({ id: entry.id, score, metadata: entry.metadata });
+        }
         return results.sort((a, b) => b.score - a.score).slice(0, k);
     }
 
