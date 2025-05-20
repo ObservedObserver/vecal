@@ -8,6 +8,7 @@ export class VectorDB {
     private dimension: number;
     private storeName: string;
     private dbPromise: Promise<IDBDatabase>;
+    private db?: IDBDatabase;
 
     constructor(config: VectorDBConfig) {
         this.dbName = config.dbName;
@@ -28,9 +29,17 @@ export class VectorDB {
                 }
             };
 
-            request.onsuccess = () => resolve(request.result);
+            request.onsuccess = () => {
+                this.db = request.result;
+                resolve(request.result);
+            };
             request.onerror = () => reject(request.error);
         });
+    }
+
+    async close(): Promise<void> {
+        const db = await this.dbPromise;
+        db.close();
     }
 
     async add(vector: Float32Array, metadata?: Record<string, any>): Promise<string> {
@@ -67,25 +76,33 @@ export class VectorDB {
 
     async update(id: string, update: Partial<Omit<VectorEntry, 'id'>>): Promise<void> {
         const db = await this.dbPromise;
-        return new Promise(async (resolve, reject) => {
+        return new Promise((resolve, reject) => {
             const tx = db.transaction(this.storeName, 'readwrite');
             const store = tx.objectStore(this.storeName);
 
-            const current = await store.get(id);
-            if (!current) return reject(new Error('Entry not found'));
+            const getReq = store.get(id);
+            getReq.onsuccess = () => {
+                const current = getReq.result as VectorEntry | undefined;
+                if (!current) {
+                    reject(new Error('Entry not found'));
+                    return;
+                }
 
-            const updatedEntry = {
-                ...current,
-                ...update,
-                id, // Ensure ID cannot be modified
+                const updatedEntry: VectorEntry = {
+                    ...current,
+                    ...update,
+                    id,
+                };
+
+                if (updatedEntry.vector) {
+                    validateDimension(updatedEntry.vector, this.dimension);
+                    updatedEntry.norm = this.calculateNorm(updatedEntry.vector);
+                }
+
+                store.put(updatedEntry);
             };
+            getReq.onerror = () => reject(getReq.error);
 
-            if (updatedEntry.vector) {
-                validateDimension(updatedEntry.vector, this.dimension);
-                updatedEntry.norm = this.calculateNorm(updatedEntry.vector);
-            }
-
-            store.put(updatedEntry);
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
         });

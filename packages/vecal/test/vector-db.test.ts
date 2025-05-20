@@ -14,8 +14,13 @@ beforeEach(() => {
   db = new VectorDB(CONFIG);
 });
 
-afterEach(() => {
-  indexedDB.deleteDatabase(CONFIG.dbName);
+afterEach(async () => {
+  await db.close();
+  await new Promise((resolve) => {
+    const req = indexedDB.deleteDatabase(CONFIG.dbName);
+    req.onsuccess = () => resolve(null);
+    req.onerror = () => resolve(null);
+  });
 });
 
 describe('VectorDB basic operations', () => {
@@ -44,9 +49,15 @@ describe('VectorDB basic operations', () => {
     await db.add(VEC_BANANA, { label: 'Banana' });
     await db.add(VEC_CHERRY, { label: 'Cherry' });
 
-    const results = await db.search(QUERY_VEC, 2);
-    expect(results.length).toBe(2);
-    expect(results[0].id).toBe(id1); // Apple should be closest
+    try {
+      const results = await db.search(QUERY_VEC, 2);
+      console.log('DEBUG_RESULTS', results);
+      expect(results.length).toBe(2);
+      expect(results[0].id).toBe(id1); // Apple should be closest
+    } catch (err) {
+      console.error('SEARCH_ERROR', err);
+      throw err;
+    }
   });
 
   it('rejects dimension mismatch', async () => {
