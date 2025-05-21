@@ -1,5 +1,0 @@
-# Core scientific libraries
-numpy
-pandas
-matplotlib
-scikit-learn
