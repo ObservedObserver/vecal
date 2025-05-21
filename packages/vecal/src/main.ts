@@ -1,74 +1,113 @@
-import { VectorDB, SearchResult } from './index';
+import { VectorDB } from './index';
 
-interface TestConfig {
-  dbName: string;
-  dimension: number;
+interface HNStory {
+  id: number;
+  title: string;
+  url?: string;
+  by: string;
+  score: number;
 }
 
-// Type-safe logging function
-const log = (msg: string | object): void => {
-    // output.textContent += (typeof msg === 'object' ? JSON.stringify(msg) : msg) + '\n';
-    console.log(msg);
+const apiKeyInput = document.getElementById('apiKey') as HTMLInputElement;
+const saveKeyBtn = document.getElementById('saveKey') as HTMLButtonElement;
+const loadBtn = document.getElementById('loadStories') as HTMLButtonElement;
+const searchInput = document.getElementById('searchInput') as HTMLInputElement;
+const searchBtn = document.getElementById('searchBtn') as HTMLButtonElement;
+const statusDiv = document.getElementById('status') as HTMLDivElement;
+const resultsList = document.getElementById('results') as HTMLUListElement;
+
+let db: VectorDB | null = null;
+let dimension = 0;
+
+function setStatus(msg: string) {
+  statusDiv.textContent = msg;
+}
+
+function loadStoredKey() {
+  const k = localStorage.getItem('openaiKey') || '';
+  apiKeyInput.value = k;
+}
+
+loadStoredKey();
+
+saveKeyBtn.onclick = () => {
+  localStorage.setItem('openaiKey', apiKeyInput.value.trim());
+  setStatus('API key saved');
 };
 
-// Test configuration
-const TEST_CONFIG: TestConfig = {
-    dbName: 'vector-db-test',
-    dimension: 3
-};
+async function fetchEmbedding(text: string, key: string): Promise<Float32Array> {
+  const res = await fetch('https://api.openai.com/v1/embeddings', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${key}`
+    },
+    body: JSON.stringify({ model: 'text-embedding-3-small', input: text })
+  });
+  const json = await res.json();
+  const emb: number[] = json.data[0].embedding;
+  return Float32Array.from(emb);
+}
 
-// Test vectors with proper typing
-const VEC_APPLE: Float32Array = new Float32Array([0.9, 0.1, 0.1]);
-const VEC_BANANA: Float32Array = new Float32Array([0.1, 0.9, 0.1]);
-const VEC_CHERRY: Float32Array = new Float32Array([0.1, 0.1, 0.9]);
-const QUERY_VEC: Float32Array = new Float32Array([0.85, 0.2, 0.15]);
+async function fetchTopStories(): Promise<HNStory[]> {
+  const idsRes = await fetch('https://hacker-news.firebaseio.com/v0/topstories.json');
+  const ids: number[] = await idsRes.json();
+  const top = ids.slice(0, 30);
+  const stories: HNStory[] = [];
+  for (const id of top) {
+    const r = await fetch(`https://hacker-news.firebaseio.com/v0/item/${id}.json`);
+    stories.push(await r.json());
+  }
+  return stories;
+}
 
-async function runTests(): Promise<void> {
-    try {
-        // Initialize database with typed config
-        const db = new VectorDB(TEST_CONFIG);
-        log('✅ Database initialized successfully');
-
-        // Test 1: Add vectors
-        const id1 = await db.add(VEC_APPLE, { label: 'Apple' });
-        const id2 = await db.add(VEC_BANANA, { label: 'Banana' });
-        const id3 = await db.add(VEC_CHERRY, { label: 'Cherry' });
-        log(`✅ Successfully added 3 vectors (IDs: ${id1}, ${id2}, ${id3})`);
-
-        // Test 2: Similarity search
-        const results = await db.search(QUERY_VEC, 2);
-        if (results.length !== 2) throw new Error('Incorrect number of search results');
-        if (results[0].id !== id1) throw new Error('Incorrect similarity ranking');
-        log('✅ Similarity search test passed');
-        log(`   Search results: ${JSON.stringify(results, null, 2)}`);
-
-        // Test 3: Get entry
-        const entry = await db.get(id2);
-        if (!entry || entry.metadata?.label !== 'Banana') throw new Error('Failed to get entry');
-        log('✅ Entry retrieval test passed');
-
-        // Test 4: Update entry
-        await db.update(id3, { metadata: { label: 'Updated Cherry' } });
-        const updatedEntry = await db.get(id3);
-        if (updatedEntry?.metadata?.label !== 'Updated Cherry') throw new Error('Update failed');
-        log('✅ Entry update test passed');
-
-        // Test 5: Delete entry
-        await db.delete(id2);
-        const deletedEntry = await db.get(id2);
-        if (deletedEntry) throw new Error('Delete failed');
-        log('✅ Entry deletion test passed');
-
-        // Clean up test database
-        indexedDB.deleteDatabase(TEST_CONFIG.dbName);
-    } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        log(`❌ Test failed: ${errorMessage}`);
-        console.error(error);
+loadBtn.onclick = async () => {
+  const key = apiKeyInput.value.trim();
+  if (!key) {
+    setStatus('Please enter API key');
+    return;
+  }
+  setStatus('Loading stories...');
+  if (db) {
+    await db.close();
+    indexedDB.deleteDatabase('hn-stories');
+  }
+  db = null;
+  const stories = await fetchTopStories();
+  for (const story of stories) {
+    const vec = await fetchEmbedding(story.title, key);
+    if (!db) {
+      dimension = vec.length;
+      db = new VectorDB({ dbName: 'hn-stories', dimension });
     }
-}
+    await db.add(vec, { title: story.title, url: story.url || `https://news.ycombinator.com/item?id=${story.id}` });
+  }
+  setStatus(`Indexed ${stories.length} stories`);
+};
 
-// Execute tests
-runTests().catch(error => {
-    console.error('Test execution failed:', error);
-});
+searchBtn.onclick = async () => {
+  if (!db) {
+    setStatus('Load stories first');
+    return;
+  }
+  const key = apiKeyInput.value.trim();
+  if (!key) {
+    setStatus('Please enter API key');
+    return;
+  }
+  const query = searchInput.value;
+  if (!query) return;
+  const vec = await fetchEmbedding(query, key);
+  const results = await db.search(vec, 5);
+  resultsList.innerHTML = '';
+  for (const r of results) {
+    const li = document.createElement('li');
+    const a = document.createElement('a');
+    a.href = r.metadata?.url || '#';
+    a.textContent = r.metadata?.title || r.id;
+    a.target = '_blank';
+    li.appendChild(a);
+    li.appendChild(document.createTextNode(` (score: ${r.score.toFixed(2)})`));
+    resultsList.appendChild(li);
+  }
+};
