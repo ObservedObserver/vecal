@@ -2,6 +2,8 @@ export interface VectorDBConfig {
     dbName: string;
     dimension: number;
     storeName?: string;
+    distanceType?: DistanceType;
+    minkowskiP?: number;
 }
 
 export interface VectorEntry {
@@ -17,4 +19,4 @@ export interface SearchResult {
     metadata?: Record<string, any>;
 }
 
-export type DistanceType = 'cosine' | 'l2';
+export type DistanceType = 'cosine' | 'l2' | 'l1' | 'dot' | 'hamming' | 'minkowski';

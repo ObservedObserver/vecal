@@ -64,6 +64,20 @@ describe('VectorDB basic operations', () => {
     }
   });
 
+  it('supports Manhattan distance', async () => {
+    await db.add(VEC_APPLE, { label: 'Apple' });
+    await db.add(VEC_BANANA, { label: 'Banana' });
+    const results = await db.search(QUERY_VEC, 1, 'l1');
+    expect(results[0].metadata?.label).toBe('Apple');
+  });
+
+  it('supports dot product search', async () => {
+    await db.add(VEC_APPLE, { label: 'Apple' });
+    await db.add(VEC_BANANA, { label: 'Banana' });
+    const results = await db.search(QUERY_VEC, 1, 'dot');
+    expect(results[0].metadata?.label).toBe('Apple');
+  });
+
   it('builds index and performs ANN search', async () => {
     const id1 = await db.add(VEC_APPLE, { label: 'Apple' });
     await db.add(VEC_BANANA, { label: 'Banana' });

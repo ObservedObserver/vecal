@@ -7,7 +7,7 @@ Vector database in browser based on IndexedDB.
 ## Features
 
 - CRUD operations for vectors
-- Similarity search using cosine or L2 distance
+- Similarity search using multiple distance metrics
 - Optional LSH based index with approximate nearest neighbour (ANN) search
 
 ## Installation
@@ -51,6 +51,8 @@ Creates a database instance. `config` fields:
 - `dbName` – name of the IndexedDB database.
 - `dimension` – length of the stored vectors.
 - `storeName` – optional object store name (defaults to `"vectors"`).
+- `distanceType` – optional default distance metric.
+- `minkowskiP` – power parameter when using Minkowski distance (default `3`).
 
 ### `add(vector, metadata?) => Promise<string>`
 Add a vector with optional metadata. Returns the generated id.
@@ -68,10 +70,10 @@ Remove an entry from the database.
 Build an LSH index from all entries. `numHashes` controls the number of hyperplanes (default `10`).
 
 ### `search(query, k?, distanceType?) => Promise<SearchResult[]>`
-Exact similarity search. `distanceType` can be `"cosine"` or `"l2"`.
+Exact similarity search. `distanceType` can be `"cosine"`, `"l2"`, `"l1"`, `"dot"`, `"hamming"`, or `"minkowski"`.
 
 ### `annSearch(query, k?, radius?, distanceType?) => Promise<SearchResult[]>`
-Approximate nearest neighbour search using the LSH index. The index is built lazily when first needed.
+Approximate nearest neighbour search using the LSH index. The index is built lazily when first needed. `distanceType` uses the same options as `search`.
 
 ### `close() => Promise<void>`
 Close the underlying IndexedDB connection.
