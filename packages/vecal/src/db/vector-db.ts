@@ -1,6 +1,13 @@
 import { VectorDBConfig, VectorEntry, SearchResult, DistanceType } from './types';
 import { LSHIndex } from './lsh-index';
-import { cosineSimilarity, euclideanDistance } from '../lib/similarity';
+import {
+    cosineSimilarity,
+    euclideanDistance,
+    manhattanDistance,
+    dotProduct as vectorDotProduct,
+    hammingDistance,
+    minkowskiDistance,
+} from '../lib/similarity';
 import { generateId } from '../utils/id';
 import { validateDimension } from '../utils/validation';
 
@@ -11,11 +18,15 @@ export class VectorDB {
     private dbPromise: Promise<IDBDatabase>;
     private db?: IDBDatabase;
     private index?: LSHIndex;
+    private defaultDistance: DistanceType;
+    private minkowskiP: number;
 
     constructor(config: VectorDBConfig) {
         this.dbName = config.dbName;
         this.dimension = config.dimension;
         this.storeName = config.storeName || 'vectors';
+        this.defaultDistance = config.distanceType || 'cosine';
+        this.minkowskiP = config.minkowskiP || 3;
         this.dbPromise = this.initDB();
     }
 
@@ -157,8 +168,9 @@ export class VectorDB {
         this.index = index;
     }
 
-    async search(query: Float32Array, k: number = 5, distanceType: DistanceType = 'cosine'): Promise<SearchResult[]> {
+    async search(query: Float32Array, k: number = 5, distanceType?: DistanceType): Promise<SearchResult[]> {
         validateDimension(query, this.dimension);
+        distanceType = distanceType || this.defaultDistance;
         const db = await this.dbPromise;
 
         const allEntries = await new Promise<VectorEntry[]>((resolve, reject) => {
@@ -177,10 +189,18 @@ export class VectorDB {
             let score: number;
 
             if (distanceType === 'cosine') {
-                const dotProduct = this.dotProduct(query, entry.vector);
-                score = dotProduct / (queryNorm * (entry.norm || 0));
+                const dot = vectorDotProduct(query, entry.vector);
+                score = queryNorm === 0 || !entry.norm ? 0 : dot / (queryNorm * (entry.norm || 0));
+            } else if (distanceType === 'l2') {
+                score = -euclideanDistance(query, entry.vector);
+            } else if (distanceType === 'l1') {
+                score = -manhattanDistance(query, entry.vector);
+            } else if (distanceType === 'dot') {
+                score = vectorDotProduct(query, entry.vector);
+            } else if (distanceType === 'hamming') {
+                score = -hammingDistance(query, entry.vector);
             } else {
-                score = -euclideanDistance(query, entry.vector); // negative euclidean distance for max similarity
+                score = -minkowskiDistance(query, entry.vector, this.minkowskiP);
             }
 
             results.push({
@@ -197,9 +217,10 @@ export class VectorDB {
         query: Float32Array,
         k: number = 5,
         radius: number = 1,
-        distanceType: DistanceType = 'cosine'
+        distanceType?: DistanceType
     ): Promise<SearchResult[]> {
         validateDimension(query, this.dimension);
+        distanceType = distanceType || this.defaultDistance;
         if (!this.index) {
             await this.buildIndex();
         }
@@ -220,10 +241,18 @@ export class VectorDB {
         for (const entry of entries) {
             let score: number;
             if (distanceType === 'cosine') {
-                const dotProduct = this.dotProduct(query, entry.vector);
-                score = dotProduct / (queryNorm * (entry.norm || 0));
-            } else {
+                const dot = vectorDotProduct(query, entry.vector);
+                score = queryNorm === 0 || !entry.norm ? 0 : dot / (queryNorm * (entry.norm || 0));
+            } else if (distanceType === 'l2') {
                 score = -euclideanDistance(query, entry.vector);
+            } else if (distanceType === 'l1') {
+                score = -manhattanDistance(query, entry.vector);
+            } else if (distanceType === 'dot') {
+                score = vectorDotProduct(query, entry.vector);
+            } else if (distanceType === 'hamming') {
+                score = -hammingDistance(query, entry.vector);
+            } else {
+                score = -minkowskiDistance(query, entry.vector, this.minkowskiP);
             }
             results.push({ id: entry.id, score, metadata: entry.metadata });
         }
@@ -234,11 +263,4 @@ export class VectorDB {
         return Math.sqrt(Array.from(vector).reduce((sum, val) => sum + val ** 2, 0));
     }
 
-    private dotProduct(a: Float32Array, b: Float32Array): number {
-        let sum = 0;
-        for (let i = 0; i < a.length; i++) {
-            sum += a[i] * b[i];
-        }
-        return sum;
-    }
 }
