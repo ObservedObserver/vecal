@@ -117,4 +117,14 @@ describe('VectorDB basic operations', () => {
     const cached = await db.get(id);
     expect(cached?.metadata?.label).toBe('Apple');
   });
+
+  it('builds HNSW index and performs search', async () => {
+    const id = await db.add(VEC_APPLE, { label: 'Apple' });
+    await db.add(VEC_BANANA, { label: 'Banana' });
+    await db.add(VEC_CHERRY, { label: 'Cherry' });
+    await db.buildHNSWIndex();
+    const results = await db.hnswSearch(QUERY_VEC, 2);
+    const ids = results.map(r => r.id);
+    expect(ids).toContain(id);
+  });
 });
