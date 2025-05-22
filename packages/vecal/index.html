@@ -6,21 +6,35 @@
     <title>Hacker News Explorer</title>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
   </head>
-  <body>
-    <h1>Hacker News Explorer</h1>
-    <div>
-      <label>OpenAI API Key: <input id="apiKey" type="password"></label>
-      <button id="saveKey">Save Key</button>
+  <body class="container mx-auto p-4">
+    <h1 class="text-2xl font-bold mb-4">Hacker News Explorer</h1>
+    <div class="mb-4 space-x-2">
+      <label class="block mb-2">OpenAI API Key:
+        <input id="apiKey" type="password" class="border rounded p-1" />
+      </label>
+      <button id="saveKey" class="px-2 py-1 bg-blue-500 text-white rounded">Save Key</button>
+      <button id="loadStories" class="px-2 py-1 bg-green-500 text-white rounded">Load Top Stories</button>
     </div>
-    <div>
-      <button id="loadStories">Load Top Stories</button>
+    <div class="mb-4 space-x-2">
+      <input id="searchInput" placeholder="Search stories" class="border rounded p-1" />
+      <button id="searchBtn" class="px-2 py-1 bg-blue-500 text-white rounded">Search</button>
     </div>
-    <div>
-      <input id="searchInput" placeholder="Search stories" />
-      <button id="searchBtn">Search</button>
+    <div id="status" class="mb-2 text-sm text-gray-600"></div>
+
+    <div class="overflow-x-auto">
+      <table class="min-w-full divide-y divide-gray-300">
+        <thead class="bg-gray-100">
+          <tr>
+            <th class="px-3 py-2 text-left">Title</th>
+            <th class="px-3 py-2 text-left">Score</th>
+            <th class="px-3 py-2 text-left">By</th>
+            <th id="similarityHeader" class="px-3 py-2 text-left hidden">Similarity</th>
+          </tr>
+        </thead>
+        <tbody id="storyBody" class="divide-y divide-gray-200"></tbody>
+      </table>
     </div>
-    <div id="status"></div>
-    <ul id="results"></ul>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
