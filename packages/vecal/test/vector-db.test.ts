@@ -105,4 +105,16 @@ describe('VectorDB basic operations', () => {
     const wrong = new Float32Array([1, 2]);
     await expect(db.add(wrong)).rejects.toThrow();
   });
+
+  it('builds IVF index and searches with cache', async () => {
+    const id = await db.add(VEC_APPLE, { label: 'Apple' });
+    await db.add(VEC_BANANA, { label: 'Banana' });
+    await db.add(VEC_CHERRY, { label: 'Cherry' });
+    await db.buildIVFFlatIndex(2, 1);
+    const results = await db.ivfSearch(QUERY_VEC, 2);
+    const ids = results.map(r => r.id);
+    expect(ids).toContain(id);
+    const cached = await db.get(id);
+    expect(cached?.metadata?.label).toBe('Apple');
+  });
 });

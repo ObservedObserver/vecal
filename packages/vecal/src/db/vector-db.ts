@@ -1,5 +1,7 @@
 import { VectorDBConfig, VectorEntry, SearchResult, DistanceType } from './types';
 import { LSHIndex } from './lsh-index';
+import { IVFFlatIndex } from './ivfflat-index';
+import { LRUCache } from './memory-cache';
 import {
     cosineSimilarity,
     euclideanDistance,
@@ -18,6 +20,8 @@ export class VectorDB {
     private dbPromise: Promise<IDBDatabase>;
     private db?: IDBDatabase;
     private index?: LSHIndex;
+    private ivf?: IVFFlatIndex;
+    private cache: LRUCache<string, VectorEntry>;
     private defaultDistance: DistanceType;
     private minkowskiP: number;
 
@@ -28,6 +32,20 @@ export class VectorDB {
         this.defaultDistance = config.distanceType || 'cosine';
         this.minkowskiP = config.minkowskiP || 3;
         this.dbPromise = this.initDB();
+        this.cache = new LRUCache<string, VectorEntry>(0);
+    }
+
+    private async updateCacheCapacity() {
+        const db = await this.dbPromise;
+        const count = await new Promise<number>((resolve, reject) => {
+            const tx = db.transaction(this.storeName, 'readonly');
+            const store = tx.objectStore(this.storeName);
+            const req = store.count();
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+        const cap = Math.max(Math.floor(count * 0.2), 1);
+        this.cache.setMaxSize(cap);
     }
 
     private initDB(): Promise<IDBDatabase> {
@@ -70,10 +88,15 @@ export class VectorDB {
             const tx = db.transaction(this.storeName, 'readwrite');
             const store = tx.objectStore(this.storeName);
             store.add(entry);
-            tx.oncomplete = () => {
+            tx.oncomplete = async () => {
                 if (this.index) {
                     this.index.add(id, vector);
                 }
+                if (this.ivf) {
+                    this.ivf.add(id, vector);
+                }
+                this.cache.set(id, entry);
+                await this.updateCacheCapacity();
                 resolve(id);
             };
             tx.onerror = () => reject(tx.error);
@@ -81,13 +104,19 @@ export class VectorDB {
     }
 
     async get(id: string): Promise<VectorEntry | undefined> {
+        const cached = this.cache.get(id);
+        if (cached) return cached;
         const db = await this.dbPromise;
         return new Promise((resolve, reject) => {
             const tx = db.transaction(this.storeName, 'readonly');
             const store = tx.objectStore(this.storeName);
             const request = store.get(id);
 
-            request.onsuccess = () => resolve(request.result);
+            request.onsuccess = () => {
+                const res = request.result as VectorEntry | undefined;
+                if (res) this.cache.set(id, res);
+                resolve(res);
+            };
             request.onerror = () => reject(request.error);
         });
     }
@@ -122,10 +151,18 @@ export class VectorDB {
                     this.index.remove(id, current.vector);
                     this.index.add(id, updatedEntry.vector);
                 }
+                if (this.ivf) {
+                    this.ivf.remove(id, current.vector);
+                    this.ivf.add(id, updatedEntry.vector);
+                }
+                this.cache.set(id, updatedEntry);
             };
             getReq.onerror = () => reject(getReq.error);
 
-            tx.oncomplete = () => resolve();
+            tx.oncomplete = async () => {
+                await this.updateCacheCapacity();
+                resolve();
+            };
             tx.onerror = () => reject(tx.error);
         });
     }
@@ -137,10 +174,15 @@ export class VectorDB {
             const tx = db.transaction(this.storeName, 'readwrite');
             const store = tx.objectStore(this.storeName);
             store.delete(id);
-            tx.oncomplete = () => {
+            tx.oncomplete = async () => {
                 if (this.index && entry) {
                     this.index.remove(id, entry.vector);
                 }
+                if (this.ivf && entry) {
+                    this.ivf.remove(id, entry.vector);
+                }
+                this.cache.delete(id);
+                await this.updateCacheCapacity();
                 resolve();
             };
             tx.onerror = () => reject(tx.error);
@@ -166,6 +208,14 @@ export class VectorDB {
             index.add(entry.id, entry.vector);
         }
         this.index = index;
+    }
+
+    async buildIVFFlatIndex(nlist = 256, nprobe = 8): Promise<void> {
+        const entries = await this.getAllEntries();
+        const ivf = new IVFFlatIndex(this.dimension, nlist, nprobe);
+        ivf.build(entries.map((e) => ({ id: e.id, vector: e.vector })));
+        this.ivf = ivf;
+        await this.updateCacheCapacity();
     }
 
     async search(query: Float32Array, k: number = 5, distanceType?: DistanceType): Promise<SearchResult[]> {
@@ -211,6 +261,22 @@ export class VectorDB {
         }
 
         return results.sort((a, b) => b.score - a.score).slice(0, k);
+    }
+
+    async ivfSearch(query: Float32Array, k = 5): Promise<SearchResult[]> {
+        validateDimension(query, this.dimension);
+        if (!this.ivf) {
+            await this.buildIVFFlatIndex();
+        }
+        const results = this.ivf!.search(query, k);
+        const entries: SearchResult[] = [];
+        for (const r of results) {
+            const e = await this.get(r.id);
+            if (e) {
+                entries.push({ id: r.id, score: -r.distance, metadata: e.metadata });
+            }
+        }
+        return entries.sort((a, b) => b.score - a.score).slice(0, k);
     }
 
     async annSearch(
