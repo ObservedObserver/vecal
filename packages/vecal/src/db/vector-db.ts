@@ -1,6 +1,7 @@
 import { VectorDBConfig, VectorEntry, SearchResult, DistanceType } from './types';
 import { LSHIndex } from './lsh-index';
 import { IVFFlatIndex } from './ivfflat-index';
+import { HNSWIndex } from './hnsw-index';
 import { LRUCache } from './memory-cache';
 import {
     cosineSimilarity,
@@ -21,6 +22,7 @@ export class VectorDB {
     private db?: IDBDatabase;
     private index?: LSHIndex;
     private ivf?: IVFFlatIndex;
+    private hnsw?: HNSWIndex;
     private cache: LRUCache<string, VectorEntry>;
     private defaultDistance: DistanceType;
     private minkowskiP: number;
@@ -218,6 +220,33 @@ export class VectorDB {
         await this.updateCacheCapacity();
     }
 
+    async buildHNSWIndex(m = 16, efConstruction = 200): Promise<void> {
+        const entries = await this.getAllEntries();
+        if (typeof Worker !== 'undefined') {
+            try {
+                const worker = new Worker(new URL('./hnsw-worker.ts', import.meta.url), { type: 'module' });
+                const result: Promise<HNSWIndex> = new Promise((resolve) => {
+                    worker.onmessage = (ev) => {
+                        const { index } = ev.data;
+                        resolve(index);
+                        worker.terminate();
+                    };
+                });
+                worker.postMessage({ type: 'build', dim: this.dimension, m, efConstruction, entries });
+                this.hnsw = await result;
+            } catch {
+                const hnsw = new HNSWIndex(this.dimension, m, efConstruction);
+                hnsw.build(entries.map((e) => ({ id: e.id, vector: e.vector })));
+                this.hnsw = hnsw;
+            }
+        } else {
+            const hnsw = new HNSWIndex(this.dimension, m, efConstruction);
+            hnsw.build(entries.map((e) => ({ id: e.id, vector: e.vector })));
+            this.hnsw = hnsw;
+        }
+        await this.updateCacheCapacity();
+    }
+
     async search(query: Float32Array, k: number = 5, distanceType?: DistanceType): Promise<SearchResult[]> {
         validateDimension(query, this.dimension);
         distanceType = distanceType || this.defaultDistance;
@@ -277,6 +306,20 @@ export class VectorDB {
             }
         }
         return entries.sort((a, b) => b.score - a.score).slice(0, k);
+    }
+
+    async hnswSearch(query: Float32Array, k = 5): Promise<SearchResult[]> {
+        validateDimension(query, this.dimension);
+        if (!this.hnsw) {
+            await this.buildHNSWIndex();
+        }
+        const results = this.hnsw!.search(query, k);
+        const formatted: SearchResult[] = [];
+        for (const r of results) {
+            const e = await this.get(r.id);
+            if (e) formatted.push({ id: r.id, score: -r.distance, metadata: e.metadata });
+        }
+        return formatted.sort((a, b) => b.score - a.score).slice(0, k);
     }
 
     async annSearch(
