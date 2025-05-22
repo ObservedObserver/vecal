@@ -1,0 +1,46 @@
+---
+title: API Reference
+description: Detailed documentation for the Vecal API.
+---
+
+# API Reference
+
+## `new VectorDB(config: VectorDBConfig)`
+Creates a database instance.
+
+- `dbName` – name of the IndexedDB database.
+- `dimension` – length of the stored vectors.
+- `storeName` – optional object store name (defaults to `"vectors"`).
+- `distanceType` – default distance metric (`cosine`, `l2`, `l1`, `dot`, `hamming`, `minkowski`).
+- `minkowskiP` – power parameter for Minkowski distance (default `3`).
+
+## `add(vector, metadata?) => Promise<string>`
+Add a vector with optional metadata. Returns the generated id.
+
+## `get(id) => Promise<VectorEntry | undefined>`
+Retrieve a stored entry.
+
+## `update(id, update) => Promise<void>`
+Partially update an entry.
+
+## `delete(id) => Promise<void>`
+Remove an entry from the database.
+
+## `buildIndex(numHashes?) => Promise<void>`
+Build an LSH index from all entries. `numHashes` controls the number of hyperplanes (default `10`).
+
+## `search(query, k?, distanceType?) => Promise<SearchResult[]>`
+Exact similarity search. `distanceType` can be `'cosine'`, `'l2'`, `'l1'`, `'dot'`, `'hamming'`, or `'minkowski'`.
+
+## `annSearch(query, k?, radius?, distanceType?) => Promise<SearchResult[]>`
+Approximate nearest neighbour search using the LSH index. The index is built lazily when first needed.
+
+## `close() => Promise<void>`
+Close the underlying IndexedDB connection.
+
+## Types
+
+- `VectorDBConfig`
+- `VectorEntry`
+- `SearchResult`
+- `DistanceType`

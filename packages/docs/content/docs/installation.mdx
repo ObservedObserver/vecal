@@ -1,0 +1,29 @@
+---
+title: Installation
+description: How to install Vecal in your project.
+---
+
+# Installation
+
+Install Vecal from npm:
+
+```bash
+npm install vecal
+# or
+yarn add vecal
+```
+
+## Basic Usage
+
+```ts
+import { VectorDB } from 'vecal';
+
+const db = new VectorDB({ dbName: 'example', dimension: 3 });
+
+const id = await db.add(new Float32Array([0.9, 0.1, 0.1]), { label: 'Apple' });
+
+const results = await db.search(new Float32Array([0.85, 0.2, 0.15]), 2);
+console.log(results);
+```
+
+For more features see the [API reference](./api-reference).

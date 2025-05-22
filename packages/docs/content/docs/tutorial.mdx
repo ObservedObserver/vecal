@@ -1,0 +1,23 @@
+---
+title: Tutorial
+description: Indexing text with OpenAI embeddings using Vecal.
+---
+
+# Tutorial: Indexing text with OpenAI embeddings
+
+This tutorial shows how to build a small Hacker News search tool with Vecal and OpenAI embeddings. The complete code lives in `src/main.ts` of the project.
+
+1. Obtain an OpenAI API key.
+2. Fetch the data you want to index.
+3. Convert each text item to an embedding using the OpenAI API.
+4. Create a `VectorDB` instance with the correct dimension and store each vector.
+5. Perform searches with `db.search` or `db.annSearch`.
+
+```ts
+const db = new VectorDB({ dbName: 'hn-stories', dimension });
+
+await db.add(embedding, { title: story.title, url: story.url });
+const results = await db.search(queryEmbedding, 5);
+```
+
+Check the source file for the full working example.
