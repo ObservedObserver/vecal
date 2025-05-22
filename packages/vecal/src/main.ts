@@ -14,7 +14,8 @@ const loadBtn = document.getElementById('loadStories') as HTMLButtonElement;
 const searchInput = document.getElementById('searchInput') as HTMLInputElement;
 const searchBtn = document.getElementById('searchBtn') as HTMLButtonElement;
 const statusDiv = document.getElementById('status') as HTMLDivElement;
-const resultsList = document.getElementById('results') as HTMLUListElement;
+const tableBody = document.getElementById('storyBody') as HTMLTableSectionElement;
+const simHeader = document.getElementById('similarityHeader') as HTMLTableCellElement;
 
 let db: VectorDB | null = null;
 let dimension = 0;
@@ -29,6 +30,38 @@ function loadStoredKey() {
 }
 
 loadStoredKey();
+
+function renderRow(story: HNStory, similarity?: number) {
+  const tr = document.createElement('tr');
+  const titleTd = document.createElement('td');
+  const a = document.createElement('a');
+  a.href = story.url || `https://news.ycombinator.com/item?id=${story.id}`;
+  a.textContent = story.title;
+  a.target = '_blank';
+  titleTd.appendChild(a);
+  titleTd.className = 'px-3 py-2';
+
+  const scoreTd = document.createElement('td');
+  scoreTd.textContent = String(story.score);
+  scoreTd.className = 'px-3 py-2';
+
+  const byTd = document.createElement('td');
+  byTd.textContent = story.by;
+  byTd.className = 'px-3 py-2';
+
+  tr.appendChild(titleTd);
+  tr.appendChild(scoreTd);
+  tr.appendChild(byTd);
+
+  if (similarity !== undefined) {
+    const simTd = document.createElement('td');
+    simTd.textContent = similarity.toFixed(2);
+    simTd.className = 'px-3 py-2';
+    tr.appendChild(simTd);
+  }
+
+  tableBody.appendChild(tr);
+}
 
 saveKeyBtn.onclick = () => {
   localStorage.setItem('openaiKey', apiKeyInput.value.trim());
@@ -49,17 +82,6 @@ async function fetchEmbedding(text: string, key: string): Promise<Float32Array> 
   return Float32Array.from(emb);
 }
 
-async function fetchTopStories(): Promise<HNStory[]> {
-  const idsRes = await fetch('https://hacker-news.firebaseio.com/v0/topstories.json');
-  const ids: number[] = await idsRes.json();
-  const top = ids.slice(0, 30);
-  const stories: HNStory[] = [];
-  for (const id of top) {
-    const r = await fetch(`https://hacker-news.firebaseio.com/v0/item/${id}.json`);
-    stories.push(await r.json());
-  }
-  return stories;
-}
 
 loadBtn.onclick = async () => {
   const key = apiKeyInput.value.trim();
@@ -73,16 +95,35 @@ loadBtn.onclick = async () => {
     indexedDB.deleteDatabase('hn-stories');
   }
   db = null;
-  const stories = await fetchTopStories();
-  for (const story of stories) {
+  tableBody.innerHTML = '';
+  simHeader.classList.add('hidden');
+
+  const idsRes = await fetch('https://hacker-news.firebaseio.com/v0/topstories.json');
+  const ids: number[] = await idsRes.json();
+  const top = ids.slice(0, 30);
+  let count = 0;
+
+  for (const id of top) {
+    setStatus(`Loading ${count + 1}/${top.length} stories...`);
+    const r = await fetch(`https://hacker-news.firebaseio.com/v0/item/${id}.json`);
+    const story: HNStory = await r.json();
+    renderRow(story);
+
     const vec = await fetchEmbedding(story.title, key);
     if (!db) {
       dimension = vec.length;
       db = new VectorDB({ dbName: 'hn-stories', dimension });
     }
-    await db.add(vec, { title: story.title, url: story.url || `https://news.ycombinator.com/item?id=${story.id}` });
+    await db.add(vec, {
+      title: story.title,
+      url: story.url || `https://news.ycombinator.com/item?id=${story.id}`,
+      by: story.by,
+      score: story.score
+    });
+    count++;
   }
-  setStatus(`Indexed ${stories.length} stories`);
+
+  setStatus(`Indexed ${count} stories`);
 };
 
 searchBtn.onclick = async () => {
@@ -97,17 +138,15 @@ searchBtn.onclick = async () => {
   }
   const query = searchInput.value;
   if (!query) return;
+  setStatus('Searching...');
   const vec = await fetchEmbedding(query, key);
   const results = await db.search(vec, 5);
-  resultsList.innerHTML = '';
+  tableBody.innerHTML = '';
+  simHeader.classList.remove('hidden');
   for (const r of results) {
-    const li = document.createElement('li');
-    const a = document.createElement('a');
-    a.href = r.metadata?.url || '#';
-    a.textContent = r.metadata?.title || r.id;
-    a.target = '_blank';
-    li.appendChild(a);
-    li.appendChild(document.createTextNode(` (score: ${r.score.toFixed(2)})`));
-    resultsList.appendChild(li);
+    const meta = r.metadata as HNStory | undefined;
+    if (!meta) continue;
+    renderRow(meta, r.score);
   }
+  setStatus(`Found ${results.length} results`);
 };
