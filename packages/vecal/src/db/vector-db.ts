@@ -1,7 +1,7 @@
 import { VectorDBConfig, VectorEntry, SearchResult, DistanceType } from './types';
 import { LSHIndex } from './lsh-index';
 import { IVFFlatIndex } from './ivfflat-index';
-import { HNSWIndex } from './hnsw-index';
+import { HNSWIndex, HNSWSerializedIndex } from './hnsw-index';
 import { LRUCache } from './memory-cache';
 import {
     cosineSimilarity,
@@ -26,6 +26,8 @@ export class VectorDB {
     private cache: LRUCache<string, VectorEntry>;
     private defaultDistance: DistanceType;
     private minkowskiP: number;
+    private hnswDirty: boolean;
+    private isClosed: boolean;
 
     constructor(config: VectorDBConfig) {
         this.dbName = config.dbName;
@@ -35,19 +37,27 @@ export class VectorDB {
         this.minkowskiP = config.minkowskiP || 3;
         this.dbPromise = this.initDB();
         this.cache = new LRUCache<string, VectorEntry>(0);
+        this.hnswDirty = false;
+        this.isClosed = false;
     }
 
     private async updateCacheCapacity() {
-        const db = await this.dbPromise;
-        const count = await new Promise<number>((resolve, reject) => {
-            const tx = db.transaction(this.storeName, 'readonly');
-            const store = tx.objectStore(this.storeName);
-            const req = store.count();
-            req.onsuccess = () => resolve(req.result);
-            req.onerror = () => reject(req.error);
-        });
-        const cap = Math.max(Math.floor(count * 0.2), 1);
-        this.cache.setMaxSize(cap);
+        if (this.isClosed) return;
+        try {
+            const db = await this.dbPromise;
+            if (this.isClosed) return;
+            const count = await new Promise<number>((resolve, reject) => {
+                const tx = db.transaction(this.storeName, 'readonly');
+                const store = tx.objectStore(this.storeName);
+                const req = store.count();
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error);
+            });
+            const cap = Math.max(Math.floor(count * 0.2), 1);
+            this.cache.setMaxSize(cap);
+        } catch {
+            // ignore cache updates if DB is no longer available
+        }
     }
 
     private initDB(): Promise<IDBDatabase> {
@@ -71,11 +81,25 @@ export class VectorDB {
     }
 
     async close(): Promise<void> {
+        if (this.isClosed) return;
         const db = await this.dbPromise;
         db.close();
+        this.db = undefined;
+        this.index = undefined;
+        this.ivf = undefined;
+        this.hnsw = undefined;
+        this.hnswDirty = false;
+        this.isClosed = true;
+    }
+
+    private ensureOpen(): void {
+        if (this.isClosed) {
+            throw new Error('Database is closed');
+        }
     }
 
     async add(vector: Float32Array, metadata?: Record<string, any>): Promise<string> {
+        this.ensureOpen();
         validateDimension(vector, this.dimension);
         const id = generateId();
         const entry: VectorEntry = {
@@ -97,6 +121,9 @@ export class VectorDB {
                 if (this.ivf) {
                     this.ivf.add(id, vector);
                 }
+                if (this.hnsw) {
+                    this.hnswDirty = true;
+                }
                 this.cache.set(id, entry);
                 await this.updateCacheCapacity();
                 resolve(id);
@@ -106,6 +133,7 @@ export class VectorDB {
     }
 
     async get(id: string): Promise<VectorEntry | undefined> {
+        this.ensureOpen();
         const cached = this.cache.get(id);
         if (cached) return cached;
         const db = await this.dbPromise;
@@ -124,6 +152,7 @@ export class VectorDB {
     }
 
     async update(id: string, update: Partial<Omit<VectorEntry, 'id'>>): Promise<void> {
+        this.ensureOpen();
         const db = await this.dbPromise;
         return new Promise((resolve, reject) => {
             const tx = db.transaction(this.storeName, 'readwrite');
@@ -157,6 +186,9 @@ export class VectorDB {
                     this.ivf.remove(id, current.vector);
                     this.ivf.add(id, updatedEntry.vector);
                 }
+                if (this.hnsw) {
+                    this.hnswDirty = true;
+                }
                 this.cache.set(id, updatedEntry);
             };
             getReq.onerror = () => reject(getReq.error);
@@ -170,6 +202,7 @@ export class VectorDB {
     }
 
     async delete(id: string): Promise<void> {
+        this.ensureOpen();
         const db = await this.dbPromise;
         const entry = await this.get(id);
         return new Promise((resolve, reject) => {
@@ -183,6 +216,9 @@ export class VectorDB {
                 if (this.ivf && entry) {
                     this.ivf.remove(id, entry.vector);
                 }
+                if (this.hnsw) {
+                    this.hnswDirty = true;
+                }
                 this.cache.delete(id);
                 await this.updateCacheCapacity();
                 resolve();
@@ -192,6 +228,7 @@ export class VectorDB {
     }
 
     private async getAllEntries(): Promise<VectorEntry[]> {
+        this.ensureOpen();
         const db = await this.dbPromise;
         return new Promise((resolve, reject) => {
             const tx = db.transaction(this.storeName, 'readonly');
@@ -204,6 +241,7 @@ export class VectorDB {
     }
 
     async buildIndex(numHashes: number = 10): Promise<void> {
+        this.ensureOpen();
         const entries = await this.getAllEntries();
         const index = new LSHIndex(this.dimension, numHashes);
         for (const entry of entries) {
@@ -213,6 +251,7 @@ export class VectorDB {
     }
 
     async buildIVFFlatIndex(nlist = 256, nprobe = 8): Promise<void> {
+        this.ensureOpen();
         const entries = await this.getAllEntries();
         const ivf = new IVFFlatIndex(this.dimension, nlist, nprobe);
         ivf.build(entries.map((e) => ({ id: e.id, vector: e.vector })));
@@ -221,19 +260,28 @@ export class VectorDB {
     }
 
     async buildHNSWIndex(m = 16, efConstruction = 200): Promise<void> {
+        this.ensureOpen();
         const entries = await this.getAllEntries();
         if (typeof Worker !== 'undefined') {
             try {
                 const worker = new Worker(new URL('./hnsw-worker.ts', import.meta.url), { type: 'module' });
-                const result: Promise<HNSWIndex> = new Promise((resolve) => {
-                    worker.onmessage = (ev) => {
-                        const { index } = ev.data;
-                        resolve(index);
+                const result: Promise<HNSWSerializedIndex> = new Promise((resolve, reject) => {
+                    worker.onmessage = (ev: MessageEvent<{ type: 'done'; index: HNSWSerializedIndex } | { type: 'error'; message: string }>) => {
+                        const message = ev.data;
+                        if (message.type === 'done') {
+                            resolve(message.index);
+                        } else {
+                            reject(new Error(message.message));
+                        }
+                        worker.terminate();
+                    };
+                    worker.onerror = (event) => {
+                        reject(new Error(event.message || 'Failed to build HNSW index in worker'));
                         worker.terminate();
                     };
                 });
                 worker.postMessage({ type: 'build', dim: this.dimension, m, efConstruction, entries });
-                this.hnsw = await result;
+                this.hnsw = HNSWIndex.deserialize(await result);
             } catch {
                 const hnsw = new HNSWIndex(this.dimension, m, efConstruction);
                 hnsw.build(entries.map((e) => ({ id: e.id, vector: e.vector })));
@@ -244,10 +292,12 @@ export class VectorDB {
             hnsw.build(entries.map((e) => ({ id: e.id, vector: e.vector })));
             this.hnsw = hnsw;
         }
+        this.hnswDirty = false;
         await this.updateCacheCapacity();
     }
 
     async search(query: Float32Array, k: number = 5, distanceType?: DistanceType): Promise<SearchResult[]> {
+        this.ensureOpen();
         validateDimension(query, this.dimension);
         distanceType = distanceType || this.defaultDistance;
         const db = await this.dbPromise;
@@ -293,6 +343,7 @@ export class VectorDB {
     }
 
     async ivfSearch(query: Float32Array, k = 5): Promise<SearchResult[]> {
+        this.ensureOpen();
         validateDimension(query, this.dimension);
         if (!this.ivf) {
             await this.buildIVFFlatIndex();
@@ -308,12 +359,13 @@ export class VectorDB {
         return entries.sort((a, b) => b.score - a.score).slice(0, k);
     }
 
-    async hnswSearch(query: Float32Array, k = 5): Promise<SearchResult[]> {
+    async hnswSearch(query: Float32Array, k = 5, efSearch = 64): Promise<SearchResult[]> {
+        this.ensureOpen();
         validateDimension(query, this.dimension);
-        if (!this.hnsw) {
+        if (!this.hnsw || this.hnswDirty) {
             await this.buildHNSWIndex();
         }
-        const results = this.hnsw!.search(query, k);
+        const results = this.hnsw!.search(query, k, efSearch);
         const formatted: SearchResult[] = [];
         for (const r of results) {
             const e = await this.get(r.id);
@@ -328,6 +380,7 @@ export class VectorDB {
         radius: number = 1,
         distanceType?: DistanceType
     ): Promise<SearchResult[]> {
+        this.ensureOpen();
         validateDimension(query, this.dimension);
         distanceType = distanceType || this.defaultDistance;
         if (!this.index) {

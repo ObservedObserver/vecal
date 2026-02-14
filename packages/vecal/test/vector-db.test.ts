@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { VectorDB } from '../src';
+import { VectorDB, HNSWIndex } from '../src';
 
 const CONFIG = { dbName: 'jest-db', dimension: 3 };
 
@@ -52,16 +52,9 @@ describe('VectorDB basic operations', () => {
     await db.add(VEC_BANANA, { label: 'Banana' });
     await db.add(VEC_CHERRY, { label: 'Cherry' });
 
-    try {
-      console.log('start')
-      const results = await db.search(QUERY_VEC, 2);
-      console.log('DEBUG_RESULTS', results);
-      expect(results.length).toBe(2);
-      expect(results[0].id).toBe(id1); // Apple should be closest
-    } catch (err) {
-      console.error('SEARCH_ERROR', err);
-      throw err;
-    }
+    const results = await db.search(QUERY_VEC, 2);
+    expect(results.length).toBe(2);
+    expect(results[0].id).toBe(id1); // Apple should be closest
   });
 
   it('supports Manhattan distance', async () => {
@@ -126,5 +119,93 @@ describe('VectorDB basic operations', () => {
     const results = await db.hnswSearch(QUERY_VEC, 2);
     const ids = results.map(r => r.id);
     expect(ids).toContain(id);
+  });
+
+  it('builds HNSW index through worker path and performs search', async () => {
+    const OriginalWorker = globalThis.Worker;
+
+    class MockWorker {
+      onmessage: ((ev: MessageEvent<{ type: 'done'; index: ReturnType<HNSWIndex['serialize']> }>) => void) | null = null;
+      onerror: ((ev: ErrorEvent) => void) | null = null;
+
+      postMessage(message: { dim: number; m: number; efConstruction: number; entries: { id: string; vector: Float32Array }[] }) {
+        const index = new HNSWIndex(message.dim, message.m, message.efConstruction);
+        index.build(message.entries);
+        setTimeout(() => {
+          this.onmessage?.({
+            data: { type: 'done', index: index.serialize() },
+          } as MessageEvent<{ type: 'done'; index: ReturnType<HNSWIndex['serialize']> }>);
+        }, 0);
+      }
+
+      terminate() {}
+    }
+
+    (globalThis as any).Worker = MockWorker;
+
+    try {
+      const id = await db.add(VEC_APPLE, { label: 'Apple' });
+      await db.add(VEC_BANANA, { label: 'Banana' });
+      await db.buildHNSWIndex();
+      const results = await db.hnswSearch(VEC_APPLE, 1);
+      expect(results[0].id).toBe(id);
+    } finally {
+      (globalThis as any).Worker = OriginalWorker;
+    }
+  });
+
+  it('rebuilds HNSW index when data changes', async () => {
+    const bananaId = await db.add(VEC_BANANA, { label: 'Banana' });
+    await db.buildHNSWIndex();
+
+    const appleId = await db.add(VEC_APPLE, { label: 'Apple' });
+    const afterAdd = await db.hnswSearch(VEC_APPLE, 1);
+    expect(afterAdd[0].id).toBe(appleId);
+
+    await db.update(bananaId, { vector: VEC_APPLE, metadata: { label: 'Banana->Apple' } });
+    const afterUpdate = await db.hnswSearch(VEC_APPLE, 2);
+    expect(afterUpdate.map(r => r.id)).toContain(bananaId);
+
+    await db.delete(appleId);
+    const afterDelete = await db.hnswSearch(VEC_APPLE, 2);
+    expect(afterDelete.map(r => r.id)).not.toContain(appleId);
+  });
+
+  it('keeps or improves recall with larger HNSW efSearch', async () => {
+    for (let i = 0; i < 80; i++) {
+      const vec = new Float32Array([
+        ((i * 17) % 100) / 100,
+        ((i * 29) % 100) / 100,
+        ((i * 43) % 100) / 100,
+      ]);
+      await db.add(vec, { idx: i });
+    }
+
+    await db.buildHNSWIndex(8, 64);
+    const query = new Float32Array([0.52, 0.37, 0.91]);
+    const k = 10;
+
+    const exact = await db.search(query, k, 'l2');
+    const lowEf = await db.hnswSearch(query, k, 8);
+    const highEf = await db.hnswSearch(query, k, 64);
+
+    const exactSet = new Set(exact.map((r) => r.id));
+    const lowOverlap = lowEf.filter((r) => exactSet.has(r.id)).length;
+    const highOverlap = highEf.filter((r) => exactSet.has(r.id)).length;
+
+    expect(highOverlap).toBeGreaterThanOrEqual(lowOverlap);
+  });
+
+  it('throws clear errors after close', async () => {
+    await db.close();
+
+    await expect(db.add(VEC_APPLE)).rejects.toThrow('Database is closed');
+    await expect(db.get('non-existent')).rejects.toThrow('Database is closed');
+    await expect(db.search(QUERY_VEC)).rejects.toThrow('Database is closed');
+  });
+
+  it('exports VectorDB from public entry', async () => {
+    const mod = await import('../src/index');
+    expect(mod.VectorDB).toBeDefined();
   });
 });

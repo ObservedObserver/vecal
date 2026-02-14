@@ -2,7 +2,19 @@
   "name": "vecal",
   "version": "0.0.1",
   "type": "module",
+  "main": "./dist/vecal.es.js",
   "module": "./dist/vecal.es.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/vecal.es.js",
+      "default": "./dist/vecal.es.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
   "engines": {
     "node": ">=16"
   },
@@ -10,7 +22,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "NODE_OPTIONS=--experimental-vm-modules npx jest"
+    "test": "NODE_OPTIONS=--experimental-vm-modules npx jest --config ./jest.config.cjs --watchman=false",
+    "test:smoke": "yarn build && node --input-type=module -e \"import('./dist/vecal.es.js').then((m) => { if (!m.VectorDB) throw new Error('VectorDB export missing'); })\""
   },
   "devDependencies": {
     "@jest/globals": "^29.7.0",

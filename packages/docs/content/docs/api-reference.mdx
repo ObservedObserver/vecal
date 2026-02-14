@@ -29,14 +29,40 @@ Remove an entry from the database.
 ## `buildIndex(numHashes?) => Promise<void>`
 Build an LSH index from all entries. `numHashes` controls the number of hyperplanes (default `10`).
 
+## `buildIVFFlatIndex(nlist?, nprobe?) => Promise<void>`
+Build an IVFFlat index from all entries.
+
+- `nlist` – number of clusters (default `256`).
+- `nprobe` – number of clusters searched during query (default `8`).
+
+## `buildHNSWIndex(m?, efConstruction?) => Promise<void>`
+Build a graph-based HNSW index from all entries.
+
+- `m` – max neighbors per node (default `16`).
+- `efConstruction` – construction-time candidate size (default `200`).
+
 ## `search(query, k?, distanceType?) => Promise<SearchResult[]>`
 Exact similarity search. `distanceType` can be `'cosine'`, `'l2'`, `'l1'`, `'dot'`, `'hamming'`, or `'minkowski'`.
 
 ## `annSearch(query, k?, radius?, distanceType?) => Promise<SearchResult[]>`
 Approximate nearest neighbour search using the LSH index. The index is built lazily when first needed.
 
+## `ivfSearch(query, k?) => Promise<SearchResult[]>`
+Approximate nearest neighbour search using the IVFFlat index. The index is built lazily when first needed.
+
+## `hnswSearch(query, k?, efSearch?) => Promise<SearchResult[]>`
+Approximate nearest neighbour search using the HNSW index. The index is built lazily when first needed.
+
+- `efSearch` – query-time candidate queue size (default `64`). Larger values usually improve recall with higher search cost.
+
 ## `close() => Promise<void>`
 Close the underlying IndexedDB connection.
+
+After `close()`, all API methods throw `Database is closed`.
+
+## Index persistence behavior
+
+ANN indexes (LSH/IVFFlat/HNSW) are in-memory and are not persisted to IndexedDB. They are rebuilt lazily in a new session.
 
 ## Types
 
