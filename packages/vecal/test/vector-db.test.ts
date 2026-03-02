@@ -40,6 +40,28 @@ describe('VectorDB basic operations', () => {
     expect(updated?.metadata?.label).toBe('Updated');
   }, 10000);
 
+  it('avoids count calls when updating entries', async () => {
+    const originalCount = IDBObjectStore.prototype.count;
+    let countCalls = 0;
+
+    (IDBObjectStore.prototype as any).count = function (...args: any[]) {
+      countCalls++;
+      return (originalCount as any).apply(this, args);
+    };
+
+    try {
+      const id = await db.add(VEC_BANANA, { label: 'Banana' });
+      countCalls = 0;
+
+      await db.update(id, { metadata: { label: 'Updated once' } });
+      await db.update(id, { metadata: { label: 'Updated twice' } });
+
+      expect(countCalls).toBe(0);
+    } finally {
+      (IDBObjectStore.prototype as any).count = originalCount;
+    }
+  });
+
   it('deletes entries', async () => {
     const id = await db.add(VEC_CHERRY, { label: 'Cherry' });
     await db.delete(id);
@@ -69,6 +91,28 @@ describe('VectorDB basic operations', () => {
     await db.add(VEC_BANANA, { label: 'Banana' });
     const results = await db.search(QUERY_VEC, 1, 'dot');
     expect(results[0].metadata?.label).toBe('Apple');
+  });
+
+  it('supports metadata filters and minimum score for exact search', async () => {
+    await db.add(VEC_APPLE, { label: 'Apple', category: 'fruit', rating: 5 });
+    await db.add(VEC_BANANA, { label: 'Banana', category: 'fruit', rating: 2 });
+    await db.add(VEC_CHERRY, { label: 'Cherry', category: 'berry', rating: 4 });
+
+    const objectFilter = await db.search(QUERY_VEC, 3, 'cosine', {
+      filter: { category: 'fruit' },
+    });
+    expect(objectFilter).toHaveLength(2);
+    expect(objectFilter.every((r) => r.metadata?.category === 'fruit')).toBe(true);
+
+    const functionFilter = await db.search(QUERY_VEC, 3, 'cosine', {
+      filter: (entry) => (entry.metadata?.rating ?? 0) >= 4,
+    });
+    expect(functionFilter).toHaveLength(2);
+    expect(functionFilter.every((r) => (r.metadata?.rating ?? 0) >= 4)).toBe(true);
+
+    const highScoreOnly = await db.search(QUERY_VEC, 3, 'cosine', { minScore: 0.9 });
+    expect(highScoreOnly.length).toBeGreaterThan(0);
+    expect(highScoreOnly.every((r) => r.score >= 0.9)).toBe(true);
   });
 
   it('builds index and performs ANN search', async () => {
@@ -119,6 +163,33 @@ describe('VectorDB basic operations', () => {
     const results = await db.hnswSearch(QUERY_VEC, 2);
     const ids = results.map(r => r.id);
     expect(ids).toContain(id);
+  });
+
+  it('applies metadata filters to ANN search methods', async () => {
+    const appleId = await db.add(VEC_APPLE, { label: 'Apple', group: 'keep' });
+    const bananaId = await db.add(VEC_BANANA, { label: 'Banana', group: 'drop' });
+    const cherryId = await db.add(VEC_CHERRY, { label: 'Cherry', group: 'keep' });
+
+    await db.buildIndex(8);
+    const lshFiltered = await db.annSearch(QUERY_VEC, 3, 1, 'cosine', { filter: { group: 'drop' } });
+    expect(lshFiltered).toHaveLength(1);
+    expect(lshFiltered[0].id).toBe(bananaId);
+
+    await db.buildIVFFlatIndex(2, 2);
+    const ivfFiltered = await db.ivfSearch(QUERY_VEC, 3, { filter: { group: 'keep' } });
+    const ivfIds = ivfFiltered.map((r) => r.id);
+    expect(ivfIds).toContain(appleId);
+    expect(ivfIds).toContain(cherryId);
+    expect(ivfIds).not.toContain(bananaId);
+
+    await db.buildHNSWIndex();
+    const hnswFiltered = await db.hnswSearch(QUERY_VEC, 3, 64, {
+      filter: (entry) => entry.metadata?.group === 'keep',
+    });
+    const hnswIds = hnswFiltered.map((r) => r.id);
+    expect(hnswIds).toContain(appleId);
+    expect(hnswIds).toContain(cherryId);
+    expect(hnswIds).not.toContain(bananaId);
   });
 
   it('builds HNSW index through worker path and performs search', async () => {

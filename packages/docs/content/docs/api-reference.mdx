@@ -41,16 +41,19 @@ Build a graph-based HNSW index from all entries.
 - `m` – max neighbors per node (default `16`).
 - `efConstruction` – construction-time candidate size (default `200`).
 
-## `search(query, k?, distanceType?) => Promise<SearchResult[]>`
+## `search(query, k?, distanceType?, options?) => Promise<SearchResult[]>`
 Exact similarity search. `distanceType` can be `'cosine'`, `'l2'`, `'l1'`, `'dot'`, `'hamming'`, or `'minkowski'`.
 
-## `annSearch(query, k?, radius?, distanceType?) => Promise<SearchResult[]>`
+- `options.filter` – metadata filter (object equality/in-list matching) or a predicate `(entry) => boolean`.
+- `options.minScore` – minimum score threshold for returned results.
+
+## `annSearch(query, k?, radius?, distanceType?, options?) => Promise<SearchResult[]>`
 Approximate nearest neighbour search using the LSH index. The index is built lazily when first needed.
 
-## `ivfSearch(query, k?) => Promise<SearchResult[]>`
+## `ivfSearch(query, k?, options?) => Promise<SearchResult[]>`
 Approximate nearest neighbour search using the IVFFlat index. The index is built lazily when first needed.
 
-## `hnswSearch(query, k?, efSearch?) => Promise<SearchResult[]>`
+## `hnswSearch(query, k?, efSearch?, options?) => Promise<SearchResult[]>`
 Approximate nearest neighbour search using the HNSW index. The index is built lazily when first needed.
 
 - `efSearch` – query-time candidate queue size (default `64`). Larger values usually improve recall with higher search cost.
@@ -70,3 +73,5 @@ ANN indexes (LSH/IVFFlat/HNSW) are in-memory and are not persisted to IndexedDB.
 - `VectorEntry`
 - `SearchResult`
 - `DistanceType`
+- `SearchOptions`
+- `MetadataFilter`

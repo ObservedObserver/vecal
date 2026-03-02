@@ -33,6 +33,10 @@ export class LRUCache<K, V> {
         this.map.delete(key);
     }
 
+    clear(): void {
+        this.map.clear();
+    }
+
     private evictIfNeeded(): void {
         while (this.map.size > this.maxSize) {
             const firstKey = this.map.keys().next().value;

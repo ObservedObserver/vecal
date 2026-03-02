@@ -1,10 +1,9 @@
-import { VectorDBConfig, VectorEntry, SearchResult, DistanceType } from './types';
+import { VectorDBConfig, VectorEntry, SearchResult, DistanceType, SearchOptions, MetadataFilter } from './types';
 import { LSHIndex } from './lsh-index';
 import { IVFFlatIndex } from './ivfflat-index';
 import { HNSWIndex, HNSWSerializedIndex } from './hnsw-index';
 import { LRUCache } from './memory-cache';
 import {
-    cosineSimilarity,
     euclideanDistance,
     manhattanDistance,
     dotProduct as vectorDotProduct,
@@ -28,6 +27,7 @@ export class VectorDB {
     private minkowskiP: number;
     private hnswDirty: boolean;
     private isClosed: boolean;
+    private entryCount: number | null;
 
     constructor(config: VectorDBConfig) {
         this.dbName = config.dbName;
@@ -39,22 +39,36 @@ export class VectorDB {
         this.cache = new LRUCache<string, VectorEntry>(0);
         this.hnswDirty = false;
         this.isClosed = false;
+        this.entryCount = null;
     }
 
-    private async updateCacheCapacity() {
+    private setCacheCapacity(entryCount: number): void {
+        const cap = Math.max(Math.floor(entryCount * 0.2), 1);
+        this.cache.setMaxSize(cap);
+    }
+
+    private async fetchEntryCount(): Promise<number> {
+        const db = await this.dbPromise;
+        if (this.isClosed) return 0;
+        return new Promise<number>((resolve, reject) => {
+            const tx = db.transaction(this.storeName, 'readonly');
+            const store = tx.objectStore(this.storeName);
+            const req = store.count();
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    private async updateCacheCapacity(knownCount?: number) {
         if (this.isClosed) return;
         try {
-            const db = await this.dbPromise;
-            if (this.isClosed) return;
-            const count = await new Promise<number>((resolve, reject) => {
-                const tx = db.transaction(this.storeName, 'readonly');
-                const store = tx.objectStore(this.storeName);
-                const req = store.count();
-                req.onsuccess = () => resolve(req.result);
-                req.onerror = () => reject(req.error);
-            });
-            const cap = Math.max(Math.floor(count * 0.2), 1);
-            this.cache.setMaxSize(cap);
+            if (typeof knownCount === 'number') {
+                this.entryCount = Math.max(knownCount, 0);
+            } else if (this.entryCount === null) {
+                this.entryCount = await this.fetchEntryCount();
+            }
+
+            this.setCacheCapacity(this.entryCount ?? 0);
         } catch {
             // ignore cache updates if DB is no longer available
         }
@@ -89,6 +103,8 @@ export class VectorDB {
         this.ivf = undefined;
         this.hnsw = undefined;
         this.hnswDirty = false;
+        this.entryCount = null;
+        this.cache.clear();
         this.isClosed = true;
     }
 
@@ -96,6 +112,34 @@ export class VectorDB {
         if (this.isClosed) {
             throw new Error('Database is closed');
         }
+    }
+
+    private normalizeVector(vector: Float32Array | ArrayLike<number> | Record<string, number>): Float32Array {
+        if (vector instanceof Float32Array) {
+            return vector;
+        }
+
+        const maybeLength = (vector as ArrayLike<number>)?.length;
+        if (typeof maybeLength === 'number') {
+            return Float32Array.from(Array.from(vector as ArrayLike<number>));
+        }
+
+        return Float32Array.from(Object.values(vector as Record<string, number>));
+    }
+
+    private normalizeEntry(entry: VectorEntry): VectorEntry {
+        const normalizedVector = this.normalizeVector(entry.vector as unknown as Float32Array | ArrayLike<number> | Record<string, number>);
+        const needsNorm = typeof entry.norm !== 'number';
+
+        if (normalizedVector === entry.vector && !needsNorm) {
+            return entry;
+        }
+
+        return {
+            ...entry,
+            vector: normalizedVector,
+            norm: needsNorm ? this.calculateNorm(normalizedVector) : entry.norm,
+        };
     }
 
     async add(vector: Float32Array, metadata?: Record<string, any>): Promise<string> {
@@ -125,7 +169,8 @@ export class VectorDB {
                     this.hnswDirty = true;
                 }
                 this.cache.set(id, entry);
-                await this.updateCacheCapacity();
+                const nextCount = this.entryCount === null ? undefined : this.entryCount + 1;
+                await this.updateCacheCapacity(nextCount);
                 resolve(id);
             };
             tx.onerror = () => reject(tx.error);
@@ -144,8 +189,14 @@ export class VectorDB {
 
             request.onsuccess = () => {
                 const res = request.result as VectorEntry | undefined;
-                if (res) this.cache.set(id, res);
-                resolve(res);
+                if (!res) {
+                    resolve(undefined);
+                    return;
+                }
+
+                const normalized = this.normalizeEntry(res);
+                this.cache.set(id, normalized);
+                resolve(normalized);
             };
             request.onerror = () => reject(request.error);
         });
@@ -160,43 +211,49 @@ export class VectorDB {
 
             const getReq = store.get(id);
             getReq.onsuccess = () => {
-                const current = getReq.result as VectorEntry | undefined;
-                if (!current) {
-                    reject(new Error('Entry not found'));
-                    return;
-                }
+                try {
+                    const rawCurrent = getReq.result as VectorEntry | undefined;
+                    if (!rawCurrent) {
+                        reject(new Error('Entry not found'));
+                        return;
+                    }
 
-                const updatedEntry: VectorEntry = {
-                    ...current,
-                    ...update,
-                    id,
-                };
+                    const current = this.normalizeEntry(rawCurrent);
+                    const hasVectorUpdate = update.vector !== undefined;
+                    const updatedVector = hasVectorUpdate
+                        ? this.normalizeVector(update.vector as Float32Array | ArrayLike<number> | Record<string, number>)
+                        : current.vector;
 
-                if (updatedEntry.vector) {
-                    validateDimension(updatedEntry.vector, this.dimension);
-                    updatedEntry.norm = this.calculateNorm(updatedEntry.vector);
-                }
+                    validateDimension(updatedVector, this.dimension);
 
-                store.put(updatedEntry);
-                if (this.index) {
-                    this.index.remove(id, current.vector);
-                    this.index.add(id, updatedEntry.vector);
+                    const updatedEntry: VectorEntry = {
+                        ...current,
+                        ...update,
+                        id,
+                        vector: updatedVector,
+                        norm: this.calculateNorm(updatedVector),
+                    };
+
+                    store.put(updatedEntry);
+                    if (hasVectorUpdate && this.index) {
+                        this.index.remove(id, current.vector);
+                        this.index.add(id, updatedEntry.vector);
+                    }
+                    if (hasVectorUpdate && this.ivf) {
+                        this.ivf.remove(id, current.vector);
+                        this.ivf.add(id, updatedEntry.vector);
+                    }
+                    if (hasVectorUpdate && this.hnsw) {
+                        this.hnswDirty = true;
+                    }
+                    this.cache.set(id, updatedEntry);
+                } catch (error) {
+                    reject(error);
                 }
-                if (this.ivf) {
-                    this.ivf.remove(id, current.vector);
-                    this.ivf.add(id, updatedEntry.vector);
-                }
-                if (this.hnsw) {
-                    this.hnswDirty = true;
-                }
-                this.cache.set(id, updatedEntry);
             };
             getReq.onerror = () => reject(getReq.error);
 
-            tx.oncomplete = async () => {
-                await this.updateCacheCapacity();
-                resolve();
-            };
+            tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
         });
     }
@@ -220,7 +277,8 @@ export class VectorDB {
                     this.hnswDirty = true;
                 }
                 this.cache.delete(id);
-                await this.updateCacheCapacity();
+                const nextCount = entry && this.entryCount !== null ? Math.max(this.entryCount - 1, 0) : undefined;
+                await this.updateCacheCapacity(nextCount);
                 resolve();
             };
             tx.onerror = () => reject(tx.error);
@@ -235,7 +293,11 @@ export class VectorDB {
             const store = tx.objectStore(this.storeName);
             const request = store.getAll();
 
-            request.onsuccess = () => resolve(request.result as VectorEntry[]);
+            request.onsuccess = () => {
+                const entries = (request.result as VectorEntry[]).map((entry) => this.normalizeEntry(entry));
+                this.entryCount = entries.length;
+                resolve(entries);
+            };
             request.onerror = () => reject(request.error);
         });
     }
@@ -256,7 +318,7 @@ export class VectorDB {
         const ivf = new IVFFlatIndex(this.dimension, nlist, nprobe);
         ivf.build(entries.map((e) => ({ id: e.id, vector: e.vector })));
         this.ivf = ivf;
-        await this.updateCacheCapacity();
+        await this.updateCacheCapacity(entries.length);
     }
 
     async buildHNSWIndex(m = 16, efConstruction = 200): Promise<void> {
@@ -293,13 +355,60 @@ export class VectorDB {
             this.hnsw = hnsw;
         }
         this.hnswDirty = false;
-        await this.updateCacheCapacity();
+        await this.updateCacheCapacity(entries.length);
     }
 
-    async search(query: Float32Array, k: number = 5, distanceType?: DistanceType): Promise<SearchResult[]> {
+    private matchesFilter(entry: VectorEntry, filter?: MetadataFilter): boolean {
+        if (!filter) return true;
+        if (typeof filter === 'function') {
+            return filter(entry);
+        }
+
+        const metadata = entry.metadata || {};
+        for (const [key, expected] of Object.entries(filter)) {
+            const actual = metadata[key];
+            if (Array.isArray(expected)) {
+                if (!expected.some((value) => Object.is(value, actual))) {
+                    return false;
+                }
+                continue;
+            }
+            if (!Object.is(actual, expected)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private calculateScore(query: Float32Array, entry: VectorEntry, distanceType: DistanceType, queryNorm: number): number {
+        if (distanceType === 'cosine') {
+            const dot = vectorDotProduct(query, entry.vector);
+            return queryNorm === 0 || !entry.norm ? 0 : dot / (queryNorm * (entry.norm || 0));
+        }
+        if (distanceType === 'l2') {
+            return -euclideanDistance(query, entry.vector);
+        }
+        if (distanceType === 'l1') {
+            return -manhattanDistance(query, entry.vector);
+        }
+        if (distanceType === 'dot') {
+            return vectorDotProduct(query, entry.vector);
+        }
+        if (distanceType === 'hamming') {
+            return -hammingDistance(query, entry.vector);
+        }
+        return -minkowskiDistance(query, entry.vector, this.minkowskiP);
+    }
+
+    async search(
+        query: Float32Array,
+        k: number = 5,
+        distanceType?: DistanceType,
+        options: SearchOptions = {}
+    ): Promise<SearchResult[]> {
         this.ensureOpen();
         validateDimension(query, this.dimension);
-        distanceType = distanceType || this.defaultDistance;
+        const resolvedDistanceType = distanceType || this.defaultDistance;
         const db = await this.dbPromise;
 
         const allEntries = await new Promise<VectorEntry[]>((resolve, reject) => {
@@ -307,31 +416,22 @@ export class VectorDB {
             const store = tx.objectStore(this.storeName);
             const request = store.getAll();
 
-            request.onsuccess = () => resolve(request.result);
+            request.onsuccess = () => resolve((request.result as VectorEntry[]).map((entry) => this.normalizeEntry(entry)));
             request.onerror = () => reject(request.error);
         });
 
         const results: SearchResult[] = [];
-        const queryNorm = distanceType === 'cosine' ? this.calculateNorm(query) : 0;
+        const queryNorm = resolvedDistanceType === 'cosine' ? this.calculateNorm(query) : 0;
 
         for (const entry of allEntries) {
-            let score: number;
-
-            if (distanceType === 'cosine') {
-                const dot = vectorDotProduct(query, entry.vector);
-                score = queryNorm === 0 || !entry.norm ? 0 : dot / (queryNorm * (entry.norm || 0));
-            } else if (distanceType === 'l2') {
-                score = -euclideanDistance(query, entry.vector);
-            } else if (distanceType === 'l1') {
-                score = -manhattanDistance(query, entry.vector);
-            } else if (distanceType === 'dot') {
-                score = vectorDotProduct(query, entry.vector);
-            } else if (distanceType === 'hamming') {
-                score = -hammingDistance(query, entry.vector);
-            } else {
-                score = -minkowskiDistance(query, entry.vector, this.minkowskiP);
+            if (!this.matchesFilter(entry, options.filter)) {
+                continue;
             }
 
+            const score = this.calculateScore(query, entry, resolvedDistanceType, queryNorm);
+            if (typeof options.minScore === 'number' && score < options.minScore) {
+                continue;
+            }
             results.push({
                 id: entry.id,
                 score,
@@ -342,34 +442,52 @@ export class VectorDB {
         return results.sort((a, b) => b.score - a.score).slice(0, k);
     }
 
-    async ivfSearch(query: Float32Array, k = 5): Promise<SearchResult[]> {
+    async ivfSearch(query: Float32Array, k = 5, options: SearchOptions = {}): Promise<SearchResult[]> {
         this.ensureOpen();
         validateDimension(query, this.dimension);
         if (!this.ivf) {
             await this.buildIVFFlatIndex();
         }
-        const results = this.ivf!.search(query, k);
+        const candidateK = options.filter || typeof options.minScore === 'number' ? Math.max(k * 5, k + 10) : k;
+        const results = this.ivf!.search(query, candidateK);
         const entries: SearchResult[] = [];
         for (const r of results) {
             const e = await this.get(r.id);
             if (e) {
-                entries.push({ id: r.id, score: -r.distance, metadata: e.metadata });
+                if (!this.matchesFilter(e, options.filter)) {
+                    continue;
+                }
+                const score = -r.distance;
+                if (typeof options.minScore === 'number' && score < options.minScore) {
+                    continue;
+                }
+                entries.push({ id: r.id, score, metadata: e.metadata });
             }
         }
         return entries.sort((a, b) => b.score - a.score).slice(0, k);
     }
 
-    async hnswSearch(query: Float32Array, k = 5, efSearch = 64): Promise<SearchResult[]> {
+    async hnswSearch(query: Float32Array, k = 5, efSearch = 64, options: SearchOptions = {}): Promise<SearchResult[]> {
         this.ensureOpen();
         validateDimension(query, this.dimension);
         if (!this.hnsw || this.hnswDirty) {
             await this.buildHNSWIndex();
         }
-        const results = this.hnsw!.search(query, k, efSearch);
+        const candidateK = options.filter || typeof options.minScore === 'number' ? Math.max(k * 5, k + 10) : k;
+        const results = this.hnsw!.search(query, candidateK, efSearch);
         const formatted: SearchResult[] = [];
         for (const r of results) {
             const e = await this.get(r.id);
-            if (e) formatted.push({ id: r.id, score: -r.distance, metadata: e.metadata });
+            if (e) {
+                if (!this.matchesFilter(e, options.filter)) {
+                    continue;
+                }
+                const score = -r.distance;
+                if (typeof options.minScore === 'number' && score < options.minScore) {
+                    continue;
+                }
+                formatted.push({ id: r.id, score, metadata: e.metadata });
+            }
         }
         return formatted.sort((a, b) => b.score - a.score).slice(0, k);
     }
@@ -378,11 +496,12 @@ export class VectorDB {
         query: Float32Array,
         k: number = 5,
         radius: number = 1,
-        distanceType?: DistanceType
+        distanceType?: DistanceType,
+        options: SearchOptions = {}
     ): Promise<SearchResult[]> {
         this.ensureOpen();
         validateDimension(query, this.dimension);
-        distanceType = distanceType || this.defaultDistance;
+        const resolvedDistanceType = distanceType || this.defaultDistance;
         if (!this.index) {
             await this.buildIndex();
         }
@@ -392,29 +511,26 @@ export class VectorDB {
             const e = await this.get(id);
             if (e) entries.push(e);
         }
-        // fallback to full search if no candidates
-        if (entries.length === 0) {
+        // fallback to full scan when candidate set is too small
+        if (entries.length < k) {
             const all = await this.getAllEntries();
-            for (const e of all) entries.push(e);
+            const existingIds = new Set(entries.map((entry) => entry.id));
+            for (const entry of all) {
+                if (!existingIds.has(entry.id)) {
+                    entries.push(entry);
+                }
+            }
         }
 
         const results: SearchResult[] = [];
-        const queryNorm = distanceType === 'cosine' ? this.calculateNorm(query) : 0;
+        const queryNorm = resolvedDistanceType === 'cosine' ? this.calculateNorm(query) : 0;
         for (const entry of entries) {
-            let score: number;
-            if (distanceType === 'cosine') {
-                const dot = vectorDotProduct(query, entry.vector);
-                score = queryNorm === 0 || !entry.norm ? 0 : dot / (queryNorm * (entry.norm || 0));
-            } else if (distanceType === 'l2') {
-                score = -euclideanDistance(query, entry.vector);
-            } else if (distanceType === 'l1') {
-                score = -manhattanDistance(query, entry.vector);
-            } else if (distanceType === 'dot') {
-                score = vectorDotProduct(query, entry.vector);
-            } else if (distanceType === 'hamming') {
-                score = -hammingDistance(query, entry.vector);
-            } else {
-                score = -minkowskiDistance(query, entry.vector, this.minkowskiP);
+            if (!this.matchesFilter(entry, options.filter)) {
+                continue;
+            }
+            const score = this.calculateScore(query, entry, resolvedDistanceType, queryNorm);
+            if (typeof options.minScore === 'number' && score < options.minScore) {
+                continue;
             }
             results.push({ id: entry.id, score, metadata: entry.metadata });
         }
@@ -422,7 +538,12 @@ export class VectorDB {
     }
 
     private calculateNorm(vector: Float32Array): number {
-        return Math.sqrt(Array.from(vector).reduce((sum, val) => sum + val ** 2, 0));
+        let sum = 0;
+        for (let i = 0; i < vector.length; i++) {
+            const value = vector[i];
+            sum += value * value;
+        }
+        return Math.sqrt(sum);
     }
 
 }

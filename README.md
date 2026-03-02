@@ -79,6 +79,29 @@ const dotTop = await db.search(query, 1, 'dot');
 console.log(cosineTop[0], l2Top[0], dotTop[0]);
 ```
 
+### Search with metadata filters
+
+```ts
+const db = new VectorDB({ dbName: 'example-filter', dimension: 3 });
+
+await db.add(new Float32Array([0.9, 0.1, 0.1]), { label: 'Apple', tenant: 't1', rating: 5 });
+await db.add(new Float32Array([0.1, 0.9, 0.1]), { label: 'Banana', tenant: 't2', rating: 2 });
+await db.add(new Float32Array([0.1, 0.1, 0.9]), { label: 'Cherry', tenant: 't1', rating: 4 });
+
+const query = new Float32Array([0.85, 0.2, 0.15]);
+
+// Object filter: metadata equality match
+const tenantScoped = await db.search(query, 5, 'cosine', {
+  filter: { tenant: 't1' },
+});
+
+// Function filter + score threshold
+const highRated = await db.hnswSearch(query, 5, 64, {
+  filter: (entry) => (entry.metadata?.rating ?? 0) >= 4,
+  minScore: -0.8,
+});
+```
+
 ### ANN search with LSH
 
 ```ts
@@ -169,16 +192,19 @@ Build an IVFFlat index from all entries. `nlist` is the number of clusters (defa
 ### `buildHNSWIndex(m?, efConstruction?) => Promise<void>`
 Build a graph-based HNSW index from all entries. If Web Workers are available, building is attempted in a worker with a synchronous fallback path.
 
-### `search(query, k?, distanceType?) => Promise<SearchResult[]>`
+### `search(query, k?, distanceType?, options?) => Promise<SearchResult[]>`
 Exact similarity search. `distanceType` can be `"cosine"`, `"l2"`, `"l1"`, `"dot"`, `"hamming"`, or `"minkowski"`.
+`options` supports:
+- `filter` – object metadata filter (equality/in list) or a predicate function `(entry) => boolean`.
+- `minScore` – minimum accepted score for returned results.
 
-### `annSearch(query, k?, radius?, distanceType?) => Promise<SearchResult[]>`
+### `annSearch(query, k?, radius?, distanceType?, options?) => Promise<SearchResult[]>`
 Approximate nearest neighbour search using the LSH index. The index is built lazily when first needed. `distanceType` uses the same options as `search`.
 
-### `ivfSearch(query, k?) => Promise<SearchResult[]>`
+### `ivfSearch(query, k?, options?) => Promise<SearchResult[]>`
 Approximate nearest neighbour search using the IVFFlat index. The index is built lazily when first needed.
 
-### `hnswSearch(query, k?, efSearch?) => Promise<SearchResult[]>`
+### `hnswSearch(query, k?, efSearch?, options?) => Promise<SearchResult[]>`
 Approximate nearest neighbour search using the HNSW index. The index is built lazily when first needed. `efSearch` controls the search candidate queue size (default `64`), where larger values generally improve recall with higher query cost.
 
 ### `close() => Promise<void>`
@@ -202,6 +228,8 @@ ANN indexes (LSH, IVFFlat, HNSW) are in-memory structures. Stored vectors remain
 - `VectorEntry`
 - `SearchResult`
 - `DistanceType`
+- `SearchOptions`
+- `MetadataFilter`
 
 ## Tutorial: indexing text with OpenAI embeddings
 The `src/main.ts` file in this repository demonstrates how to build a small Hacker News search tool. The high level steps are:

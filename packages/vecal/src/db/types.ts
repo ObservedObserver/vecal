@@ -20,3 +20,10 @@ export interface SearchResult {
 }
 
 export type DistanceType = 'cosine' | 'l2' | 'l1' | 'dot' | 'hamming' | 'minkowski';
+
+export type MetadataFilter = Record<string, unknown> | ((entry: VectorEntry) => boolean);
+
+export interface SearchOptions {
+    filter?: MetadataFilter;
+    minScore?: number;
+}
