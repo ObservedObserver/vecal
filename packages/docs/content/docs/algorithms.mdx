@@ -1,0 +1,95 @@
+---
+title: Algorithms
+description: Exact search, HNSW, scoring, filtering, and persistence in Vecal 1.0.
+---
+
+# Algorithms and consistency
+
+Vecal 1.0 has two retrieval paths behind one `search()` method: streaming Exact and a self-contained TypeScript HNSW implementation. Both use the metric fixed when the database is opened.
+
+## Score contract
+
+All results sort by descending `score`. Equal scores sort by ascending `id` for deterministic output.
+
+| Metric | Stored/query preparation | Returned score |
+| --- | --- | --- |
+| `cosine` | Normalize on write and query; reject zero vectors | Cosine similarity |
+| `dot` | Preserve vector magnitude | Dot product |
+| `l2` | Preserve input values | Negative Euclidean distance |
+
+Because L2 is negated, `-0.2` ranks ahead of `-0.8`.
+
+## Exact search
+
+Exact search opens an IndexedDB cursor, validates cancellation in the cursor loop, applies metadata conditions, and pushes qualifying results into a heap bounded by `k`. It does not use `getAll()` and does not sort the full dataset.
+
+```ts
+const exact = await db.search(query, {
+    k: 10,
+    strategy: 'exact',
+    where: { language: { $eq: 'en' }, rating: { $gte: 4 } },
+    minScore: 0.3,
+});
+```
+
+Exact is the regression oracle for HNSW recall and the safe fallback whenever an index is absent or stale.
+
+## HNSW
+
+HNSW assigns a seeded random maximum level to each node. Sparse upper layers route queries across the graph; the dense level 0 performs a bounded best-first candidate search.
+
+```ts
+await db.ensureIndex({
+    type: 'hnsw',
+    m: 16,
+    efConstruction: 200,
+    seed: 42,
+});
+
+const approximate = await db.search(query, {
+    k: 10,
+    strategy: 'hnsw',
+    efSearch: 100,
+});
+```
+
+- `m` bounds graph degree. Higher values generally spend more memory for stronger connectivity.
+- `efConstruction` controls build-time candidate breadth.
+- `efSearch` controls query-time candidate breadth and can be tuned per query.
+- `seed` makes level assignment reproducible; it is saved with the snapshot.
+
+Vectors occupy one contiguous `Float32Array` slab. Levels, tombstones, neighbor lists, counts, and serialized offsets use compact typed arrays. Snapshots contain the graph parameters, RNG state, metric, dimension, revision, IDs, and typed-array graph buffers.
+
+## Filtering and completeness
+
+Filters support top-level metadata only. Conditions across fields are ANDed.
+
+```ts
+where: {
+    tenant: { $eq: 'acme' },
+    status: { $in: ['draft', 'published'] },
+    rating: { $gte: 4, $lt: 6 },
+}
+```
+
+Supported operators are `$eq`, `$in`, `$gt`, `$gte`, `$lt`, and `$lte`. Functions, OR, and nested paths are intentionally unsupported because predicates cannot cross the Worker boundary safely and cannot be planned predictably.
+
+For HNSW, Vecal starts with an expanded candidate budget and doubles it while a filter cannot fill `k`. If it exhausts the graph without enough matches, it executes full Exact search. This favors complete filtered results over approximate-only latency.
+
+## Revisions and multiple tabs
+
+Every entry mutation and the monotonic revision update occur in the same IndexedDB transaction. A `BroadcastChannel` provides fast notifications between open tabs, but each public operation also reads the authoritative revision. If it changed, that Worker immediately invalidates its graph before continuing.
+
+The guarantee is operation-boundary visibility: an API operation begun after another tab's transaction committed observes the current IndexedDB data. Vecal does not provide distributed transactions across tabs.
+
+## Index lifecycle
+
+- `absent`: no snapshot or graph exists.
+- `building`: `ensureIndex()` is constructing a graph in the Worker.
+- `ready`: graph revision matches the entries revision.
+- `stale`: a snapshot/revision mismatch or tombstone ratio above 10% requires rebuild.
+- `closed`: the Worker and IndexedDB connection have been closed.
+
+`auto` uses Exact for `absent`, `building`, and `stale`. Explicit `hnsw` throws `IndexNotReadyError` in those states. It never triggers an implicit build.
+
+After a successful build, Vecal checkpoints immediately. Incremental mutations debounce a checkpoint for two seconds, and `close()` waits for a ready graph to be checkpointed. A crash can lose only index acceleration; entries remain the source of truth.

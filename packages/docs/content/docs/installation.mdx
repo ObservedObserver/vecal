@@ -1,29 +1,114 @@
 ---
 title: Installation
-description: How to install Vecal in your project.
+description: Install Vecal and configure its module Worker.
 ---
 
 # Installation
 
-Install Vecal from npm:
+Install the release candidate from npm:
 
 ```bash
-npm install vecal
+npm install vecal@1.0.0-rc.1
 # or
-yarn add vecal
+yarn add vecal@1.0.0-rc.1
 ```
 
-## Basic Usage
+Vecal is ESM-only and has no runtime dependencies.
+
+## Open a database
 
 ```ts
 import { VectorDB } from 'vecal';
 
-const db = new VectorDB({ dbName: 'example', dimension: 3 });
-
-const id = await db.add(new Float32Array([0.9, 0.1, 0.1]), { label: 'Apple' });
-
-const results = await db.search(new Float32Array([0.85, 0.2, 0.15]), 2);
-console.log(results);
+const db = await VectorDB.open({
+    name: 'documents',
+    dimension: 384,
+    metric: 'cosine',
+});
 ```
 
-For more features see the [API reference](./api-reference).
+| Option | Required | Meaning |
+| --- | --- | --- |
+| `name` | Yes | Logical database name. Its physical IndexedDB name is `vecal:${name}:v1`. |
+| `dimension` | Yes | Positive integer length required for every stored and query vector. |
+| `metric` | Yes | Stable database metric: `cosine`, `l2`, or `dot`. |
+| `workerUrl` | No | Override the adjacent `dist/worker.js` module URL. |
+| `workerFactory` | No | Create a Worker-like object for CSP, bundler, or test integration. |
+
+The name, dimension, and metric are durable schema. Reopening the same name with a different dimension or metric throws `SchemaMismatchError`; 0.0.1 databases are not migrated.
+
+## Worker and CSP
+
+By default, Vecal uses the standard package-relative form:
+
+```ts
+new Worker(new URL('./worker.js', import.meta.url), {
+    type: 'module',
+    name: 'vecal:documents',
+});
+```
+
+If your Content Security Policy needs an explicit asset URL, deploy the emitted Worker module together with its adjacent internal modules:
+
+```ts
+const db = await VectorDB.open({
+    name: 'documents',
+    dimension: 384,
+    metric: 'cosine',
+    workerUrl: new URL('/vecal/dist/worker.js', location.origin),
+});
+```
+
+Or let your application bundler compile an app-local Worker entry:
+
+```ts
+const db = await VectorDB.open({
+    name: 'documents',
+    dimension: 384,
+    metric: 'cosine',
+    workerFactory: () =>
+        new Worker(new URL('./vecal.worker.ts', import.meta.url), { type: 'module' }),
+});
+```
+
+```ts title="vecal.worker.ts"
+import { startVecalWorker } from 'vecal/worker';
+
+startVecalWorker();
+```
+
+Serve Worker modules with JavaScript MIME type and allow their origin in `worker-src`. Vecal intentionally has no main-thread storage/search fallback: if the Worker cannot start, `open()` fails.
+
+## SSR frameworks
+
+The package can be imported on a server, but only call `VectorDB.open()` from a client component, effect, browser event, or other client-only path.
+
+```tsx
+'use client';
+
+import { useEffect } from 'react';
+import { VectorDB } from 'vecal';
+
+export function SearchClient() {
+    useEffect(() => {
+        let disposed = false;
+        let database: Awaited<ReturnType<typeof VectorDB.open>> | undefined;
+
+        void VectorDB.open({ name: 'search', dimension: 384, metric: 'cosine' }).then((db) => {
+            if (disposed) void db.close();
+            else database = db;
+        });
+
+        return () => {
+            disposed = true;
+            void database?.close();
+        };
+    }, []);
+
+    return null;
+}
+```
+
+## Compatibility
+
+Vecal supports the latest two releases of Chrome, Firefox, and Safari. It requires IndexedDB, Dedicated Workers, module Workers, structured clone, `BroadcastChannel` for fast cross-tab notification, and `crypto.randomUUID()` for generated IDs. Authoritative revision checks still protect operation-boundary consistency when a notification is delayed.

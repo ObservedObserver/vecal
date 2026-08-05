@@ -1,22 +1,78 @@
 ---
 title: Vecal
-description: Lightweight vector database in the browser based on IndexedDB.
+description: A browser-local vector database powered by IndexedDB and a dedicated Worker.
 ---
 
-# Vecal
+# Vecal 1.0
 
-![NPM Version](https://img.shields.io/npm/v/vecal)
+Vecal is a browser-local vector database for applications that need private, offline-capable vector retrieval without operating a database server. IndexedDB is the durable source of truth; a dedicated module Worker owns storage, exact search, HNSW construction, and approximate search.
 
-Vecal is a lightweight vector database that runs entirely in the browser. It stores vectors in IndexedDB and provides fast similarity search APIs.
+The `1.0.0-rc.1` line is deliberately narrow:
 
-## Features
+- Exact and self-contained TypeScript HNSW search.
+- `cosine`, `l2`, and `dot` metrics with one higher-is-better score contract.
+- Atomic batch CRUD, JSON metadata, structured top-level filters, cancellation, and build progress.
+- Revision-aware multi-tab consistency and persistent HNSW snapshots.
+- ESM-only output, complete TypeScript declarations, source maps, and zero runtime dependencies.
 
-- CRUD operations for vectors
-- Similarity search using multiple distance metrics
-- Optional LSH based index with approximate nearest neighbour (ANN) search
-- In-memory cache for frequently accessed vectors
-- Written in TypeScript and works in modern browsers
+Vecal does not generate embeddings and does not include cloud sync, collections, LSH, IVF, CommonJS output, or import/export APIs.
 
-## Getting Started
+## First query
 
-Learn how to install Vecal in the [installation guide](./installation). A step‑by‑step example is available in the [tutorial](./tutorial). For full API details check the [API reference](./api-reference).
+```ts
+import { VectorDB, type Metadata } from 'vecal';
+
+interface ProductMetadata extends Metadata {
+    title: string;
+    category: string;
+}
+
+const db = await VectorDB.open<ProductMetadata>({
+    name: 'product-search',
+    dimension: 3,
+    metric: 'cosine',
+});
+
+await db.addMany([
+    {
+        id: 'shoe',
+        vector: new Float32Array([0.92, 0.1, 0.04]),
+        metadata: { title: 'Lightweight running shoe', category: 'shoes' },
+    },
+    {
+        id: 'bag',
+        vector: new Float32Array([0.12, 0.87, 0.44]),
+        metadata: { title: 'Trail hydration pack', category: 'bags' },
+    },
+]);
+
+const results = await db.search(new Float32Array([0.88, 0.16, 0.08]), {
+    k: 3,
+    strategy: 'exact',
+    where: { category: { $eq: 'shoes' } },
+});
+```
+
+## One search API
+
+| Strategy | Behavior | Use when |
+| --- | --- | --- |
+| `auto` | Uses HNSW only when its state is `ready`; otherwise exact | Normal application traffic |
+| `exact` | Streams every matching IndexedDB entry through a bounded top-k heap | Correctness baselines and highly selective queries |
+| `hnsw` | Requires an already-ready HNSW index | You want explicit approximate-only behavior |
+
+`hnsw` never builds implicitly. Call `ensureIndex()` during an intentional indexing phase. Filtered HNSW search expands candidates and, if it cannot fill `k`, completes the query with exact search so filtered results are not silently lost.
+
+## Scale and environment
+
+The intended 1.0 envelope is 50k×384-dimensional vectors or 10k×1536-dimensional vectors. This is a local database, not a replacement for a multi-user or distributed vector service. Benchmark your data, embedding distribution, and device class before shipping.
+
+Vecal targets the latest two Chrome, Firefox, and Safari releases. Importing the package during SSR is safe, but `VectorDB.open()` requires browser IndexedDB and Dedicated Worker support.
+
+## Continue
+
+1. [Install and configure the Worker](./installation).
+2. Build an embedding-to-search flow in the [tutorial](./tutorial).
+3. Understand scoring, Exact, and HNSW in [algorithms](./algorithms).
+4. Copy production patterns from [examples](./examples).
+5. Check signatures and stable errors in the [API reference](./api-reference).

@@ -1,0 +1,5 @@
+{
+  "name": "vecal-vite-consumer",
+  "private": true,
+  "type": "module"
+}

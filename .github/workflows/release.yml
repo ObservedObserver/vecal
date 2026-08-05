@@ -1,0 +1,63 @@
+name: Publish Vecal
+
+on:
+  push:
+    tags:
+      - 'v1.*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: yarn
+          registry-url: https://registry.npmjs.org
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+      - name: Unit, package, consumer, type, and docs gates
+        run: |
+          yarn workspace vecal test:coverage
+          yarn workspace vecal test:smoke
+          yarn workspace vecal test:types
+          yarn workspace docs build
+      - name: Install browser runtimes
+        run: yarn playwright install --with-deps chromium firefox webkit
+      - name: Browser gate
+        run: |
+          yarn workspace vecal test:browser
+          yarn workspace vecal test:consumers:browser
+      - name: Select npm distribution tag
+        id: npm-tag
+        working-directory: packages/vecal
+        run: |
+          if node -e "process.exit(require('./package.json').version.includes('-') ? 0 : 1)"; then
+            echo "tag=next" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Stable-release performance gate
+        if: steps.npm-tag.outputs.tag == 'latest'
+        run: |
+          yarn playwright install --with-deps chrome
+          yarn workspace vecal test:benchmark
+      - name: Upload stable benchmark record
+        if: steps.npm-tag.outputs.tag == 'latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vecal-release-benchmark
+          path: |
+            packages/vecal/output/playwright/benchmark.json
+            packages/vecal/test-results
+          if-no-files-found: error
+      - name: Publish with provenance
+        working-directory: packages/vecal
+        run: npm publish --provenance --access public --tag "${{ steps.npm-tag.outputs.tag }}"

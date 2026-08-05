@@ -19,10 +19,21 @@ export const baseOptions: BaseLayoutProps = {
         >
           <circle cx={12} cy={12} r={12} fill="currentColor" />
         </svg>
-        My App
+        Vecal
       </>
     ),
   },
   // see https://fumadocs.dev/docs/ui/navigation/links
-  links: [],
+  links: [
+    {
+      text: 'Docs',
+      url: '/docs',
+      active: 'nested-url',
+    },
+    {
+      text: 'API',
+      url: '/docs/api-reference',
+      active: 'url',
+    },
+  ],
 };

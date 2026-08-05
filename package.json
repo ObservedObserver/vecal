@@ -1,13 +1,18 @@
 {
   "name": "vecal-workspace",
-  "version": "0.0.1",
-  "description": "local vector store based on indexed-db",
+  "version": "1.0.0-rc.1",
+  "description": "Browser-local vector database with IndexedDB and Worker-hosted HNSW search",
   "private": true,
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
-    "test": "yarn workspace vecal test"
+    "test": "yarn workspace vecal test",
+    "test:coverage": "yarn workspace vecal test:coverage",
+    "test:browser": "yarn workspace vecal test:browser",
+    "test:benchmark": "yarn workspace vecal test:benchmark",
+    "build": "yarn workspace vecal build && yarn workspace docs build",
+    "test:smoke": "yarn workspace vecal test:smoke"
   },
   "prettier": {
     "tabWidth": 4,
@@ -16,5 +21,6 @@
   },
   "main": "index.js",
   "author": "observedobserver <270001151@qq.com>",
-  "license": "apache-2.0"
+  "license": "Apache-2.0",
+  "packageManager": "yarn@1.22.22"
 }

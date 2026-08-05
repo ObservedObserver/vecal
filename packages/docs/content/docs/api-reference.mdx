@@ -1,77 +1,184 @@
 ---
 title: API Reference
-description: Detailed documentation for the Vecal API.
+description: Vecal 1.0 methods, types, states, and stable errors.
 ---
 
-# API Reference
+# API reference
 
-## `new VectorDB(config: VectorDBConfig)`
-Creates a database instance.
+All storage and search methods are asynchronous and execute through a Dedicated Worker. Vectors are `Float32Array` values with exactly the configured dimension.
 
-- `dbName` – name of the IndexedDB database.
-- `dimension` – length of the stored vectors.
-- `storeName` – optional object store name (defaults to `"vectors"`).
-- `distanceType` – default distance metric (`cosine`, `l2`, `l1`, `dot`, `hamming`, `minkowski`).
-- `minkowskiP` – power parameter for Minkowski distance (default `3`).
+## `VectorDB.open(options)`
 
-## `add(vector, metadata?) => Promise<string>`
-Add a vector with optional metadata. Returns the generated id.
+```ts
+const db = await VectorDB.open<MyMetadata>({
+    name: 'documents',
+    dimension: 384,
+    metric: 'cosine',
+    // Optional; use one override, not both:
+    workerUrl: customWorkerUrl,
+    // workerFactory: () => new Worker(appWorkerUrl, { type: 'module' }),
+});
+```
 
-## `get(id) => Promise<VectorEntry | undefined>`
-Retrieve a stored entry.
+`name`, `dimension`, and `metric` are required. The metric is fixed for the database and all Exact/HNSW searches. A conflicting reopen throws `SchemaMismatchError`.
 
-## `update(id, update) => Promise<void>`
-Partially update an entry.
+## Records
 
-## `delete(id) => Promise<void>`
-Remove an entry from the database.
+### `add(input) => Promise<string>`
 
-## `buildIndex(numHashes?) => Promise<void>`
-Build an LSH index from all entries. `numHashes` controls the number of hyperplanes (default `10`).
+Inserts a record. Omit `id` to generate one with `crypto.randomUUID()`. An existing ID throws `RecordConflictError`.
 
-## `buildIVFFlatIndex(nlist?, nprobe?) => Promise<void>`
-Build an IVFFlat index from all entries.
+### `addMany(inputs) => Promise<string[]>`
 
-- `nlist` – number of clusters (default `256`).
-- `nprobe` – number of clusters searched during query (default `8`).
+Inserts all inputs in one transaction. The operation is all-or-nothing, including conflicts within the input batch.
 
-## `buildHNSWIndex(m?, efConstruction?) => Promise<void>`
-Build a graph-based HNSW index from all entries.
+### `upsert(inputWithId) => Promise<string>`
 
-- `m` – max neighbors per node (default `16`).
-- `efConstruction` – construction-time candidate size (default `200`).
+Inserts or completely overwrites the record at an explicit ID.
 
-## `search(query, k?, distanceType?, options?) => Promise<SearchResult[]>`
-Exact similarity search. `distanceType` can be `'cosine'`, `'l2'`, `'l1'`, `'dot'`, `'hamming'`, or `'minkowski'`.
+### `get(id) => Promise<VectorRecord | undefined>`
 
-- `options.filter` – metadata filter (object equality/in-list matching) or a predicate `(entry) => boolean`.
-- `options.minScore` – minimum score threshold for returned results.
+Returns one record. With cosine metric, the returned stored vector is normalized.
 
-## `annSearch(query, k?, radius?, distanceType?, options?) => Promise<SearchResult[]>`
-Approximate nearest neighbour search using the LSH index. The index is built lazily when first needed.
+### `getMany(ids) => Promise<Array<VectorRecord | undefined>>`
 
-## `ivfSearch(query, k?, options?) => Promise<SearchResult[]>`
-Approximate nearest neighbour search using the IVFFlat index. The index is built lazily when first needed.
+Returns records in the same order as the requested IDs.
 
-## `hnswSearch(query, k?, efSearch?, options?) => Promise<SearchResult[]>`
-Approximate nearest neighbour search using the HNSW index. The index is built lazily when first needed.
+### `update(id, patch) => Promise<void>`
 
-- `efSearch` – query-time candidate queue size (default `64`). Larger values usually improve recall with higher search cost.
+Updates `vector`, `metadata`, or both. If `metadata` is present, it replaces the entire metadata object. A missing ID throws `RecordNotFoundError`.
 
-## `close() => Promise<void>`
-Close the underlying IndexedDB connection.
+### `delete(id) => Promise<boolean>`
 
-After `close()`, all API methods throw `Database is closed`.
+Returns whether an existing record was deleted.
 
-## Index persistence behavior
+### `deleteMany(ids) => Promise<number>`
 
-ANN indexes (LSH/IVFFlat/HNSW) are in-memory and are not persisted to IndexedDB. They are rebuilt lazily in a new session.
+Deletes unique IDs in one transaction and returns the number found.
 
-## Types
+### `count() => Promise<number>`
 
-- `VectorDBConfig`
-- `VectorEntry`
-- `SearchResult`
-- `DistanceType`
-- `SearchOptions`
-- `MetadataFilter`
+Returns the current entry count.
+
+### `clear() => Promise<void>`
+
+Atomically removes entries and snapshots, increments the revision, and returns the index state to `absent`.
+
+## Search
+
+### `search(query, options?) => Promise<SearchResult[]>`
+
+```ts
+const results = await db.search(query, {
+    k: 10,
+    strategy: 'auto',       // auto | exact | hnsw
+    efSearch: 64,
+    where: {
+        tenant: { $eq: 'acme' },
+        rating: { $gte: 4 },
+    },
+    minScore: 0.3,
+    signal: controller.signal,
+});
+```
+
+- `k` defaults to `10` and must be a positive integer.
+- `strategy` defaults to `auto`.
+- `efSearch` defaults to `64` and applies to HNSW.
+- `where` supports top-level AND conditions with `$eq`, `$in`, `$gt`, `$gte`, `$lt`, and `$lte`.
+- `minScore` is inclusive.
+- `signal` cancels Worker computation with `OperationCancelledError`.
+
+Scores are higher-is-better: cosine similarity, dot product, or negative Euclidean distance. Equal scores sort by ID.
+
+`auto` uses HNSW only in `ready` state. Explicit `hnsw` throws `IndexNotReadyError` if the index is not ready.
+
+## Index lifecycle
+
+### `ensureIndex(options) => Promise<void>`
+
+```ts
+await db.ensureIndex({
+    type: 'hnsw',
+    m: 16,
+    efConstruction: 200,
+    seed: 0x5eed1234,
+    onProgress: ({ completed, total, ratio }) => {},
+    signal: controller.signal,
+});
+```
+
+Defaults are `m: 16`, `efConstruction: 200`, and a stable built-in seed. A revision collision retries once; a second collision throws `IndexBuildConflictError`.
+
+### `indexStatus() => IndexStatus`
+
+Returns the most recently reported Worker status synchronously:
+
+```ts
+interface IndexStatus {
+    state: 'absent' | 'building' | 'ready' | 'stale' | 'closed';
+    revision: number;
+    nodeCount: number;
+    tombstoneRatio: number;
+    config?: { m: number; efConstruction: number; seed: number };
+}
+```
+
+Each subsequent public operation reads the authoritative IndexedDB revision and refreshes this status if another instance committed a change.
+
+### `close() => Promise<void>`
+
+Waits for a ready index checkpoint, closes IndexedDB and `BroadcastChannel`, terminates the Worker, and moves the instance to `closed`. It is idempotent. Later operations throw `DatabaseClosedError`.
+
+## Core types
+
+```ts
+type Metric = 'cosine' | 'l2' | 'dot';
+type SearchStrategy = 'auto' | 'exact' | 'hnsw';
+
+type JSONValue =
+    | string
+    | number
+    | boolean
+    | null
+    | JSONValue[]
+    | { [key: string]: JSONValue };
+
+type Metadata = Record<string, JSONValue>;
+
+interface VectorInput<M extends Metadata> {
+    id?: string;
+    vector: Float32Array;
+    metadata?: M;
+}
+
+interface VectorRecord<M extends Metadata> {
+    id: string;
+    vector: Float32Array;
+    metadata?: M;
+}
+
+interface SearchResult<M extends Metadata> {
+    id: string;
+    score: number;
+    metadata?: M;
+}
+```
+
+Metadata must be a finite, acyclic JSON object that structured clone can transfer. `undefined`, `Date`, class instances, functions, symbols, bigint, and non-finite numbers are rejected.
+
+## Stable errors
+
+All public errors extend `VecalError` and carry a stable `code`.
+
+| Class | Code | Meaning |
+| --- | --- | --- |
+| `UnsupportedEnvironmentError` | `UNSUPPORTED_ENVIRONMENT` | Worker or IndexedDB unavailable/blocked |
+| `SchemaMismatchError` | `SCHEMA_MISMATCH` | Durable dimension, metric, or schema differs |
+| `RecordConflictError` | `RECORD_CONFLICT` | `add`/`addMany` ID already exists |
+| `RecordNotFoundError` | `RECORD_NOT_FOUND` | `update` target does not exist |
+| `IndexNotReadyError` | `INDEX_NOT_READY` | Explicit HNSW requested without a ready graph |
+| `IndexBuildConflictError` | `INDEX_BUILD_CONFLICT` | Data changed during both build attempts |
+| `OperationCancelledError` | `OPERATION_CANCELLED` | AbortSignal cancelled the request |
+| `DatabaseClosedError` | `DATABASE_CLOSED` | Operation used after close |
+| `ValidationError` | `VALIDATION_ERROR` | Invalid option, vector, metadata, or filter |

@@ -1,0 +1,177 @@
+---
+title: Examples
+description: Production-oriented Vecal 1.0 patterns.
+---
+
+# Examples
+
+## Product search with an embedding callback
+
+Keep embedding policy outside Vecal and store enough JSON metadata to render results without another lookup.
+
+```ts
+import { VectorDB, type Metadata } from 'vecal';
+
+interface ProductMetadata extends Metadata {
+    sku: string;
+    title: string;
+    category: string;
+}
+
+export async function createProductSearch(
+    embed: (text: string) => Promise<Float32Array>,
+) {
+    const db = await VectorDB.open<ProductMetadata>({
+        name: 'catalog',
+        dimension: 384,
+        metric: 'cosine',
+    });
+
+    return {
+        async addProduct(product: {
+            sku: string;
+            title: string;
+            category: string;
+            description: string;
+        }) {
+            return db.upsert({
+                id: product.sku,
+                vector: await embed(`${product.title}\n${product.description}`),
+                metadata: {
+                    sku: product.sku,
+                    title: product.title,
+                    category: product.category,
+                },
+            });
+        },
+        async search(text: string, category?: string) {
+            return db.search(await embed(text), {
+                k: 12,
+                strategy: 'auto',
+                efSearch: 100,
+                where: category ? { category: { $eq: category } } : undefined,
+                minScore: 0.25,
+            });
+        },
+        close: () => db.close(),
+    };
+}
+```
+
+## Atomic initial import
+
+```ts
+await db.addMany(
+    documents.map((document) => ({
+        id: document.id,
+        vector: Float32Array.from(document.embedding),
+        metadata: {
+            title: document.title,
+            source: document.source,
+            publishedAt: document.publishedAt,
+        },
+    })),
+);
+
+await db.ensureIndex({
+    type: 'hnsw',
+    m: 16,
+    efConstruction: 200,
+    onProgress: ({ ratio }) => setProgress(ratio),
+});
+```
+
+Prefer one `addMany()` over a loop of `add()` calls when the whole import should either commit or roll back.
+
+## Structured filtering
+
+```ts
+const results = await db.search(queryVector, {
+    k: 10,
+    strategy: 'auto',
+    where: {
+        language: { $eq: 'en' },
+        section: { $in: ['guide', 'reference'] },
+        publishedAt: { $gte: '2026-01-01' },
+    },
+});
+```
+
+Shorthand equality and in-list conditions are also accepted:
+
+```ts
+where: {
+    language: 'en',
+    section: ['guide', 'reference'],
+}
+```
+
+## Cancellation
+
+```ts
+const controller = new AbortController();
+
+const promise = db.search(queryVector, {
+    k: 20,
+    strategy: 'exact',
+    signal: controller.signal,
+});
+
+controller.abort();
+
+try {
+    await promise;
+} catch (error) {
+    if (error instanceof OperationCancelledError) {
+        // Expected user cancellation.
+    }
+}
+```
+
+Builds use the same `AbortSignal` pattern.
+
+## Compare HNSW with Exact
+
+```ts
+function recall(expected: string[], actual: string[]) {
+    const actualIds = new Set(actual);
+    return expected.filter((id) => actualIds.has(id)).length / expected.length;
+}
+
+async function recallAt10(query: Float32Array) {
+    const exact = await db.search(query, { k: 10, strategy: 'exact' });
+    const hnsw = await db.search(query, {
+        k: 10,
+        strategy: 'hnsw',
+        efSearch: 100,
+    });
+
+    return recall(
+        exact.map(({ id }) => id),
+        hnsw.map(({ id }) => id),
+    );
+}
+```
+
+Tune against representative data rather than assuming one `efSearch` works for every distribution.
+
+## React cleanup
+
+```ts
+useEffect(() => {
+    let db: VectorDB | undefined;
+    let active = true;
+
+    void VectorDB.open({ name: 'notes', dimension: 384, metric: 'cosine' }).then(
+        (opened) => {
+            if (active) db = opened;
+            else void opened.close();
+        },
+    );
+
+    return () => {
+        active = false;
+        void db?.close();
+    };
+}, []);
+```

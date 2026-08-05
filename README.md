@@ -1,242 +1,91 @@
-# vecal
+# Vecal
 
-![NPM Version](https://img.shields.io/npm/v/vecal)
+Vecal is an ESM-only, browser-local vector database. IndexedDB is the source of truth and a dedicated module Worker performs storage, exact search, HNSW construction, and approximate search away from the main thread.
 
-`vecal` is a browser vector database built on top of IndexedDB.
+The current package is the `1.0.0-rc.1` release candidate. It intentionally has no runtime dependencies and does not include embedding generation, cloud sync, collections, or server-side execution.
 
-## Features
-
-- CRUD operations for vectors
-- Similarity search using multiple distance metrics
-- Optional ANN indexes: LSH, IVFFlat, and HNSW
-- In-memory index lifecycle (indexes are rebuilt after refresh)
-
-## Installation
+## Install
 
 ```bash
-npm install vecal
+npm install vecal@1.0.0-rc.1
 # or
-yarn add vecal
+yarn add vecal@1.0.0-rc.1
 ```
 
-## Quick Start
+## Quick start
 
 ```ts
-import { VectorDB } from 'vecal';
+import { VectorDB, type Metadata } from 'vecal';
 
-const db = new VectorDB({
-  dbName: 'products-db',
-  dimension: 3,
-  distanceType: 'cosine',
-});
-
-await db.add(new Float32Array([0.9, 0.1, 0.1]), { label: 'Apple' });
-await db.add(new Float32Array([0.1, 0.9, 0.1]), { label: 'Banana' });
-await db.add(new Float32Array([0.1, 0.1, 0.9]), { label: 'Cherry' });
-
-const results = await db.search(new Float32Array([0.85, 0.2, 0.15]), 2);
-console.log(results);
-```
-
-## Common Usage Examples
-
-### CRUD operations
-
-```ts
-import { VectorDB } from 'vecal';
-
-const db = new VectorDB({ dbName: 'example-crud', dimension: 3 });
-
-const id = await db.add(new Float32Array([0.9, 0.1, 0.1]), { label: 'Apple' });
-const entry = await db.get(id);
-console.log(entry?.metadata?.label); // Apple
-
-await db.update(id, {
-  metadata: { label: 'Green Apple' },
-});
-
-await db.delete(id);
-```
-
-### Exact search with different distance metrics
-
-```ts
-const db = new VectorDB({
-  dbName: 'example-distance',
-  dimension: 3,
-  distanceType: 'cosine',
-});
-
-await db.add(new Float32Array([0.9, 0.1, 0.1]), { label: 'Apple' });
-await db.add(new Float32Array([0.1, 0.9, 0.1]), { label: 'Banana' });
-
-const query = new Float32Array([0.85, 0.2, 0.15]);
-
-const cosineTop = await db.search(query, 1, 'cosine');
-const l2Top = await db.search(query, 1, 'l2');
-const dotTop = await db.search(query, 1, 'dot');
-
-console.log(cosineTop[0], l2Top[0], dotTop[0]);
-```
-
-### Search with metadata filters
-
-```ts
-const db = new VectorDB({ dbName: 'example-filter', dimension: 3 });
-
-await db.add(new Float32Array([0.9, 0.1, 0.1]), { label: 'Apple', tenant: 't1', rating: 5 });
-await db.add(new Float32Array([0.1, 0.9, 0.1]), { label: 'Banana', tenant: 't2', rating: 2 });
-await db.add(new Float32Array([0.1, 0.1, 0.9]), { label: 'Cherry', tenant: 't1', rating: 4 });
-
-const query = new Float32Array([0.85, 0.2, 0.15]);
-
-// Object filter: metadata equality match
-const tenantScoped = await db.search(query, 5, 'cosine', {
-  filter: { tenant: 't1' },
-});
-
-// Function filter + score threshold
-const highRated = await db.hnswSearch(query, 5, 64, {
-  filter: (entry) => (entry.metadata?.rating ?? 0) >= 4,
-  minScore: -0.8,
-});
-```
-
-### ANN search with LSH
-
-```ts
-const db = new VectorDB({ dbName: 'example-lsh', dimension: 3 });
-
-await db.add(new Float32Array([0.9, 0.1, 0.1]), { label: 'Apple' });
-await db.add(new Float32Array([0.1, 0.9, 0.1]), { label: 'Banana' });
-await db.add(new Float32Array([0.1, 0.1, 0.9]), { label: 'Cherry' });
-
-await db.buildIndex(8);
-const results = await db.annSearch(new Float32Array([0.85, 0.2, 0.15]), 2, 1);
-console.log(results);
-```
-
-### ANN search with IVFFlat
-
-```ts
-const db = new VectorDB({ dbName: 'example-ivf', dimension: 3 });
-
-await db.add(new Float32Array([0.9, 0.1, 0.1]), { label: 'Apple' });
-await db.add(new Float32Array([0.1, 0.9, 0.1]), { label: 'Banana' });
-await db.add(new Float32Array([0.1, 0.1, 0.9]), { label: 'Cherry' });
-
-await db.buildIVFFlatIndex(64, 8);
-const results = await db.ivfSearch(new Float32Array([0.85, 0.2, 0.15]), 2);
-console.log(results);
-```
-
-### ANN search with HNSW
-
-```ts
-const db = new VectorDB({ dbName: 'example-hnsw', dimension: 3 });
-
-await db.add(new Float32Array([0.9, 0.1, 0.1]), { label: 'Apple' });
-await db.add(new Float32Array([0.1, 0.9, 0.1]), { label: 'Banana' });
-await db.add(new Float32Array([0.1, 0.1, 0.9]), { label: 'Cherry' });
-
-await db.buildHNSWIndex(16, 200);
-
-// Higher efSearch usually gives better recall but costs more compute.
-const fastResults = await db.hnswSearch(new Float32Array([0.85, 0.2, 0.15]), 2, 32);
-const highRecallResults = await db.hnswSearch(new Float32Array([0.85, 0.2, 0.15]), 2, 128);
-
-console.log(fastResults, highRecallResults);
-```
-
-### Close lifecycle
-
-```ts
-const db = new VectorDB({ dbName: 'example-close', dimension: 3 });
-await db.close();
-
-try {
-  await db.search(new Float32Array([0.1, 0.2, 0.3]), 1);
-} catch (error) {
-  console.error(error); // Error: Database is closed
+interface DocumentMetadata extends Metadata {
+    title: string;
+    section: 'guide' | 'api';
 }
+
+const db = await VectorDB.open<DocumentMetadata>({
+    name: 'documents',
+    dimension: 3,
+    metric: 'cosine',
+});
+
+await db.addMany([
+    {
+        id: 'indexing',
+        vector: new Float32Array([0.92, 0.1, 0.04]),
+        metadata: { title: 'Vector indexing', section: 'guide' },
+    },
+    {
+        id: 'api',
+        vector: new Float32Array([0.2, 0.84, 0.11]),
+        metadata: { title: 'API reference', section: 'api' },
+    },
+]);
+
+await db.ensureIndex({ type: 'hnsw', m: 16, efConstruction: 200 });
+
+const results = await db.search(new Float32Array([0.9, 0.12, 0.03]), {
+    k: 10,
+    strategy: 'auto',
+    efSearch: 100,
+    where: { section: { $eq: 'guide' } },
+    minScore: 0.4,
+});
+
+await db.close();
 ```
 
-## API Reference
+## Core guarantees
 
-### `new VectorDB(config: VectorDBConfig)`
-Creates a database instance. `config` fields:
-- `dbName` – name of the IndexedDB database.
-- `dimension` – length of the stored vectors.
-- `storeName` – optional object store name (defaults to `"vectors"`).
-- `distanceType` – optional default distance metric.
-- `minkowskiP` – power parameter when using Minkowski distance (default `3`).
+- Stable metrics: `cosine`, `l2`, and `dot`. Scores always sort higher-is-better; L2 returns negative Euclidean distance and equal scores sort by ID.
+- `strategy: 'auto'` uses a ready HNSW index and otherwise runs exact search. Explicit HNSW search never builds an index implicitly.
+- Exact search streams an IndexedDB cursor into a bounded top-k heap rather than loading and sorting the full database.
+- `addMany()` and `deleteMany()` use one IndexedDB transaction. Duplicate IDs make `addMany()` roll back as a unit.
+- HNSW snapshots persist in IndexedDB. A mismatched revision makes the snapshot stale without affecting stored entries.
+- Every public operation checks the authoritative revision, so another tab's committed writes are visible at the next operation boundary.
+- Metadata is JSON data. Filters support top-level AND conditions with `$eq`, `$in`, `$gt`, `$gte`, `$lt`, and `$lte`.
+- Filtered HNSW search expands its candidate set and uses a complete exact fallback if it still cannot fill `k`.
 
-### `add(vector, metadata?) => Promise<string>`
-Add a vector with optional metadata. Returns the generated id.
+## Runtime and bundlers
 
-### `get(id) => Promise<VectorEntry | undefined>`
-Retrieve a stored entry.
+Importing Vecal during SSR is safe, but `VectorDB.open()` requires IndexedDB and Dedicated Worker support. The default worker is created with:
 
-### `update(id, update) => Promise<void>`
-Partially update an entry.
+```ts
+new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+```
 
-### `delete(id) => Promise<void>`
-Remove an entry from the database.
+For CSP rules or unusual bundlers, provide `workerUrl` or `workerFactory` to `VectorDB.open()`. Your CSP must allow module workers from that URL.
 
-### `buildIndex(numHashes?) => Promise<void>`
-Build an LSH index from all entries. `numHashes` controls the number of hyperplanes (default `10`).
+Vecal targets the latest two Chrome, Firefox, and Safari releases. The intended 1.0 scale envelope is 50k vectors at 384 dimensions or 10k vectors at 1536 dimensions; validate representative data and HNSW settings on your target hardware before shipping.
 
-### `buildIVFFlatIndex(nlist?, nprobe?) => Promise<void>`
-Build an IVFFlat index from all entries. `nlist` is the number of clusters (default `256`) and `nprobe` is the number of probed clusters at query time (default `8`).
+## Development
 
-### `buildHNSWIndex(m?, efConstruction?) => Promise<void>`
-Build a graph-based HNSW index from all entries. If Web Workers are available, building is attempted in a worker with a synchronous fallback path.
+This Yarn monorepo contains the library in `packages/vecal` and documentation in `packages/docs`.
 
-### `search(query, k?, distanceType?, options?) => Promise<SearchResult[]>`
-Exact similarity search. `distanceType` can be `"cosine"`, `"l2"`, `"l1"`, `"dot"`, `"hamming"`, or `"minkowski"`.
-`options` supports:
-- `filter` – object metadata filter (equality/in list) or a predicate function `(entry) => boolean`.
-- `minScore` – minimum accepted score for returned results.
+```bash
+yarn install
+yarn test
+yarn build
+yarn workspace vecal test:browser
+```
 
-### `annSearch(query, k?, radius?, distanceType?, options?) => Promise<SearchResult[]>`
-Approximate nearest neighbour search using the LSH index. The index is built lazily when first needed. `distanceType` uses the same options as `search`.
-
-### `ivfSearch(query, k?, options?) => Promise<SearchResult[]>`
-Approximate nearest neighbour search using the IVFFlat index. The index is built lazily when first needed.
-
-### `hnswSearch(query, k?, efSearch?, options?) => Promise<SearchResult[]>`
-Approximate nearest neighbour search using the HNSW index. The index is built lazily when first needed. `efSearch` controls the search candidate queue size (default `64`), where larger values generally improve recall with higher query cost.
-
-### `close() => Promise<void>`
-Close the underlying IndexedDB connection.
-
-After calling `close()`, any further operation will throw `Database is closed`.
-
-## Index persistence behavior
-
-ANN indexes (LSH, IVFFlat, HNSW) are in-memory structures. Stored vectors remain in IndexedDB, but indexes are rebuilt on demand after page refresh or new session start.
-
-## Choosing a search method
-
-- Use `search` for exact results on small or medium datasets.
-- Use `annSearch` (LSH) for very lightweight approximate search.
-- Use `ivfSearch` for centroid-based approximate search.
-- Use `hnswSearch` for higher recall ANN and tune `efSearch` for speed/quality trade-off.
-
-### Types
-- `VectorDBConfig`
-- `VectorEntry`
-- `SearchResult`
-- `DistanceType`
-- `SearchOptions`
-- `MetadataFilter`
-
-## Tutorial: indexing text with OpenAI embeddings
-The `src/main.ts` file in this repository demonstrates how to build a small Hacker News search tool. The high level steps are:
-1. obtain an OpenAI API key;
-2. fetch items to index;
-3. convert each title to an embedding using the API;
-4. create a `VectorDB` with the embedding dimension and store each vector;
-5. run searches with `db.search` or `db.annSearch`.
-
-Refer to the code for a full example.
+See the [documentation](./packages/docs/content/docs/index.mdx) and [API reference](./packages/docs/content/docs/api-reference.mdx) for the full lifecycle, error classes, persistence semantics, and limitations.

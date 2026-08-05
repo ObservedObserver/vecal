@@ -1,23 +1,128 @@
 ---
 title: Tutorial
-description: Indexing text with OpenAI embeddings using Vecal.
+description: Build browser-local semantic search with application-supplied embeddings.
 ---
 
-# Tutorial: Indexing text with OpenAI embeddings
+# Tutorial: local semantic search
 
-This tutorial shows how to build a small Hacker News search tool with Vecal and OpenAI embeddings. The complete code lives in `src/main.ts` of the project.
+Vecal stores and retrieves vectors; your application supplies embeddings. They may come from precomputed assets, a local model, or an application backend. Do not put a provider secret in browser storage or client JavaScript.
 
-1. Obtain an OpenAI API key.
-2. Fetch the data you want to index.
-3. Convert each text item to an embedding using the OpenAI API.
-4. Create a `VectorDB` instance with the correct dimension and store each vector.
-5. Perform searches with `db.search` or `db.annSearch`.
+## 1. Define metadata and open the database
+
+Choose the dimension and metric once for a logical database.
 
 ```ts
-const db = new VectorDB({ dbName: 'hn-stories', dimension });
+import { VectorDB, type Metadata } from 'vecal';
 
-await db.add(embedding, { title: story.title, url: story.url });
-const results = await db.search(queryEmbedding, 5);
+interface ChunkMetadata extends Metadata {
+    sourceId: string;
+    title: string;
+    section: 'guide' | 'api' | 'example';
+    preview: string;
+}
+
+const db = await VectorDB.open<ChunkMetadata>({
+    name: 'docs-search',
+    dimension: 384,
+    metric: 'cosine',
+});
 ```
 
-Check the source file for the full working example.
+Cosine vectors are normalized before persistence and cosine queries are normalized in the Worker. Zero vectors and non-finite values are rejected.
+
+## 2. Import a batch atomically
+
+Generate or load embeddings outside Vecal, then store one batch in one transaction.
+
+```ts
+type PreparedChunk = {
+    id: string;
+    embedding: number[];
+    metadata: ChunkMetadata;
+};
+
+async function indexChunks(chunks: PreparedChunk[]) {
+    await db.addMany(
+        chunks.map((chunk) => ({
+            id: chunk.id,
+            vector: Float32Array.from(chunk.embedding),
+            metadata: chunk.metadata,
+        })),
+    );
+}
+```
+
+If any ID already exists, `addMany()` rejects with `RecordConflictError` and commits none of the batch. Use `upsert()` only when replacement is intentional.
+
+## 3. Establish an exact baseline
+
+Exact search is the correctness oracle and requires no index.
+
+```ts
+async function searchExactly(queryText: string) {
+    const query = Float32Array.from(await embed(queryText));
+    return db.search(query, {
+        k: 5,
+        strategy: 'exact',
+        where: {
+            section: { $in: ['guide', 'example'] },
+        },
+        minScore: 0.35,
+    });
+}
+```
+
+`embed()` is application-owned. Metadata filters combine fields with AND and operate only on top-level fields.
+
+## 4. Build HNSW intentionally
+
+Build after the initial import and show progress in your UI. Cancellation leaves IndexedDB entries intact.
+
+```ts
+const controller = new AbortController();
+
+await db.ensureIndex({
+    type: 'hnsw',
+    m: 16,
+    efConstruction: 200,
+    signal: controller.signal,
+    onProgress: ({ completed, total, ratio }) => {
+        renderIndexProgress({ completed, total, percent: Math.round(ratio * 100) });
+    },
+});
+```
+
+The build captures the starting data revision. If data changes, Vecal discards the graph and retries once; a second collision throws `IndexBuildConflictError`.
+
+## 5. Use automatic strategy selection
+
+```ts
+async function searchFast(queryText: string, section?: ChunkMetadata['section']) {
+    const query = Float32Array.from(await embed(queryText));
+    return db.search(query, {
+        k: 5,
+        strategy: 'auto',
+        efSearch: 100,
+        where: section ? { section: { $eq: section } } : undefined,
+    });
+}
+```
+
+`auto` uses HNSW only while `indexStatus().state === 'ready'`; otherwise it performs exact search. Filtered HNSW queries adaptively expand candidates. If the filtered candidates are still fewer than `k`, Vecal runs a complete exact fallback.
+
+## 6. Handle lifecycle and staleness
+
+```ts
+const status = db.indexStatus();
+// absent | building | ready | stale | closed
+
+if (status.state === 'stale') {
+    await db.ensureIndex({ type: 'hnsw' });
+}
+
+await db.close();
+```
+
+Adds update a ready graph incrementally. Vector updates insert a replacement node and tombstone the old node; deletes tombstone their node. Above a 10% tombstone ratio, the index becomes `stale`, `auto` returns to exact search, and the next `ensureIndex()` performs a clean rebuild.
+
+Snapshots are accelerators, not data. A matching snapshot restores immediately after refresh; an outdated or interrupted snapshot is ignored and exact search remains correct.
